@@ -25,7 +25,7 @@ class MatchController extends Controller
         // Load scoring rules from DB (no hardcoding)
         $rules = \Illuminate\Support\Facades\DB::table('match_scoring_rules')
             ->where('is_active', 1)
-            ->pluck('value', 'key');
+            ->pluck('value', 'rule_key');
 
         $pointsPerSharedTag   = (int)($rules['points_per_shared_tag'] ?? 0);
         $pointsSameMode       = (int)($rules['points_same_mode'] ?? 0);
