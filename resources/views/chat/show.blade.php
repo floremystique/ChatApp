@@ -37,11 +37,12 @@
     const indicator = document.getElementById('typing-indicator');
 
     const myId = {{ auth()->id() }};
-    const sendUrl = "{{ route('chat.send', $room) }}";
-    const typingUrl = "{{ route('chat.typing', $room->uuid) }}";
-    const typingStatusUrl = "{{ route('chat.typingStatus', $room->uuid) }}";
-    const seenStatusUrl = "{{ route('chat.seenStatus', $room) }}";
-    const messagesUrl = "{{ route('chat.messages', $room) }}";
+    const sendUrl = "{{ route('chat.send', $room, false) }}";
+    const typingUrl = "{{ route('chat.typing', $room->uuid, false) }}";
+    const typingStatusUrl = "{{ route('chat.typingStatus', $room->uuid, false) }}";
+    const seenStatusUrl = "{{ route('chat.seenStatus', $room, false) }}";
+    const messagesUrl = "{{ route('chat.messages', $room, false) }}";
+
 
     let newestId = 0;
     let beforeId = null;
