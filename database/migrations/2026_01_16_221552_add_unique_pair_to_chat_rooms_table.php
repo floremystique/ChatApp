@@ -8,14 +8,14 @@ return new class extends Migration {
     public function up(): void
     {
         Schema::table('chat_rooms', function (Blueprint $table) {
-            $table->unique(['user_low', 'user_high']);
+            $table->unique(['user_one', 'user_two'], 'chat_rooms_user_one_user_two_unique');
         });
     }
 
     public function down(): void
     {
         Schema::table('chat_rooms', function (Blueprint $table) {
-            $table->dropUnique(['chat_rooms_user_low_user_high_unique']);
+            $table->dropUnique('chat_rooms_user_one_user_two_unique');
         });
     }
 };
