@@ -57,7 +57,7 @@ class OnboardingController extends Controller
 
         $profile->tags()->sync($data['tags'] ?? []);
 
-        return redirect()->route('match');
+        return redirect()->route('onboarding.quiz');
     }
 
     public function quiz()
