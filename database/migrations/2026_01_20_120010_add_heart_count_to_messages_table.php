@@ -8,8 +8,7 @@ return new class extends Migration
 {
     public function up(): void
     {
-        // ✅ Railway already has this table from earlier migrations.
-        // Make this migration idempotent so deploy doesn't crash.
+        // ✅ Prevent crash if table already exists (Railway already has it)
         if (Schema::hasTable('message_reactions')) {
             return;
         }
@@ -21,7 +20,7 @@ return new class extends Migration
             $table->string('type', 16);
             $table->timestamps();
 
-            // Optional but recommended for scale
+            // optional but recommended
             $table->unique(['message_id', 'user_id', 'type']);
             $table->index('message_id');
             $table->index('user_id');
