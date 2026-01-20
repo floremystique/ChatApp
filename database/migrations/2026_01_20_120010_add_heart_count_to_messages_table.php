@@ -6,21 +6,28 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration {
     public function up(): void
-    {
-        Schema::table('messages', function (Blueprint $table) {
-            if (!Schema::hasColumn('messages', 'heart_count')) {
-                $table->unsignedInteger('heart_count')->default(0)->after('body');
-                $table->index(['chat_room_id', 'heart_count']);
-            }
+{
+    // If table doesn't exist (fresh DB), create it
+    if (!Schema::hasTable('message_reactions')) {
+        Schema::create('message_reactions', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('message_id');
+            $table->unsignedBigInteger('user_id');
+            $table->string('type', 16);
+            $table->timestamps();
         });
     }
 
-    public function down(): void
-    {
-        Schema::table('messages', function (Blueprint $table) {
-            if (Schema::hasColumn('messages', 'heart_count')) {
-                $table->dropColumn('heart_count');
-            }
-        });
-    }
+    // If it already exists (Railway), just ensure constraints/indexes exist
+    Schema::table('message_reactions', function (Blueprint $table) {
+        // Add indexes if missing (MySQL doesn't have a clean "if missing" API,
+        // so keep these consistent with your existing migrations to avoid duplicates)
+
+        // Recommended indexes/constraints:
+        // 1) Prevent duplicate same reaction by same user on same message
+        // 2) Speed queries by message_id
+        // NOTE: If these already exist, this will fail, so only add if you know they're missing.
+    });
+}
+
 };
