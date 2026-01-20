@@ -8,7 +8,6 @@ use App\Http\Controllers\MatchController;
 use App\Http\Controllers\ChatController;
 use App\Http\Controllers\ChatListController;
 
-
 Route::get('/', function () {
     return view('dashboard');
 })->middleware(['auth', 'verified'])->name('dashboard');
@@ -29,10 +28,11 @@ Route::middleware('auth')->group(function () {
     Route::get('/match', [MatchController::class, 'index'])->name('match');
     Route::post('/match/start/{user}', [MatchController::class, 'start'])->name('match.start');
 
+    // Chats
     Route::get('/chats', [ChatController::class, 'index'])->name('chats.index');
-    Route::get('/chats/poll', [\App\Http\Controllers\ChatListController::class, 'poll'])->name('chats.poll');
+    Route::get('/chats/poll', [ChatListController::class, 'poll'])->name('chats.poll');
 
-    // use uuid binding
+    // use uuid binding for ChatRoom
     Route::get('/chat/{room}', [ChatController::class, 'show'])->name('chat.show');
     Route::post('/chat/{room}/send', [ChatController::class, 'send'])->name('chat.send');
     Route::get('/chat/{room}/messages', [ChatController::class, 'messages'])->name('chat.messages');
@@ -41,6 +41,17 @@ Route::middleware('auth')->group(function () {
     Route::get('/chat/{room}/typing', [ChatController::class, 'typingStatus'])->name('chat.typingStatus');
 
     Route::get('/chat/{room}/seen-status', [ChatController::class, 'seenStatus'])->name('chat.seenStatus');
+
+    // Message actions
+    Route::post('/chat/{room}/message/{message}/react', [ChatController::class, 'toggleHeart'])->name('chat.message.heart');
+    Route::delete('/chat/{room}/message/{message}', [ChatController::class, 'deleteMessage'])->name('chat.message.delete');
+
+    // Delete/close chat
+    Route::post('/chat/{room}/delete-chat', [ChatController::class, 'deleteChat'])->name('chat.delete');
+
+    Route::get('/onboarding/quiz', [OnboardingController::class, 'quiz'])->name('onboarding.quiz');
+    Route::post('/onboarding/quiz', [OnboardingController::class, 'quizStore'])->name('onboarding.quiz.store');
+
 });
 
 require __DIR__.'/auth.php';
