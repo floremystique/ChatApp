@@ -7,7 +7,7 @@
 
         @if($users->count() === 0)
             <div class="bg-white p-6 rounded shadow">
-                <p>No matches yet. Create another test user account and complete onboarding + quiz.</p>
+                <p>No matches yet. Complete your profile and stay active to improve your chances.</p>
             </div>
         @else
             <div class="space-y-4">
