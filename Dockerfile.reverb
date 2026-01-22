@@ -1,0 +1,17 @@
+FROM php:8.3-cli-alpine
+
+# Enable pcntl + common PHP extensions Laravel may need
+RUN apk add --no-cache bash git curl icu-dev oniguruma-dev libzip-dev \
+  && docker-php-ext-install pcntl intl mbstring zip
+
+WORKDIR /app
+
+# Copy app
+COPY . /app
+
+# Composer
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+RUN composer install --no-dev --optimize-autoloader
+
+# Start Reverb
+CMD ["sh", "-lc", "php artisan reverb:start --host=0.0.0.0 --port=${PORT:-8080}"]
