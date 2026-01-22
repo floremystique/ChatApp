@@ -219,12 +219,6 @@ class ChatController extends Controller
         }
         $room->save();
 
-        \Log::info('Broadcast debug', [
-            'default' => config('broadcasting.default'),
-            'reverb'  => config('broadcasting.connections.reverb'),
-            'pusher'  => config('broadcasting.connections.pusher'),
-        ]);
-
         broadcast(new TypingUpdated($room->uuid, $me, $typing))->toOthers();
 
         // Let the other user update chat-list typing indicator
