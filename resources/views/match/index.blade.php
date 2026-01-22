@@ -11,24 +11,14 @@
             </div>
         @else
             <div class="space-y-4">
-                @php
-                    $bands = \Illuminate\Support\Facades\DB::table('match_score_bands')
-                        ->where('is_active', 1)
-                        ->orderByDesc('min_score')
-                        ->get();
-                @endphp
-
                 @foreach($users as $p)
                     @php
-                        $band = $bands->first(fn($b) => $p->score >= $b->min_score) ?? null;
-
-                        $stability = $p->score_breakdown['stability'] ?? null;
-                        $trust = $p->score_breakdown['trust'] ?? null;
-                        $resp = $p->score_breakdown['responsiveness'] ?? null;
-                        $conflictRisk = $p->score_breakdown['conflict_risk'] ?? null;
-
-                        $conflictSafety = is_null($conflictRisk) ? null : (100 - (int)$conflictRisk);
+                        $band = $p->band ?? null;
                         $insights = $p->insights ?? [];
+
+                        $chips = $p->bond_chips ?? [];
+                        $tagNames = $p->common_tags ?? collect();
+                        $tagId = 'tags_' . $p->user_id;
                     @endphp
 
                     <div class="bg-white p-5 rounded shadow">
@@ -49,33 +39,33 @@
                                 </div>
 
                                 <div class="mt-1 text-sm">
-                                    <span class="font-medium">{{ $band->label ?? 'Compatibility' }}</span>
-                                    <span class="text-gray-500">· {{ $band->description ?? 'Trust-first matching for serious relationships.' }}</span>
+                                    <span class="font-medium">{{ $band['label'] ?? 'Compatibility' }}</span>
+                                    <span class="text-gray-500">· {{ $band['description'] ?? 'Compatibility summary.' }}</span>
                                 </div>
 
-                                {{-- Trust-first chips --}}
+                                {{-- Bond chips (1 word, connection-focused) --}}
                                 <div class="mt-3 flex flex-wrap gap-2">
-                                    @if(!is_null($stability))
+                                    @if(!empty($chips['Stability']))
                                         <span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
-                                            Stability {{ (int)$stability }}
+                                            {{ $chips['Stability'] }}
                                         </span>
                                     @endif
 
-                                    @if(!is_null($trust))
+                                    @if(!empty($chips['Trust']))
                                         <span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
-                                            Trust {{ (int)$trust }}
+                                           {{ $chips['Trust'] }}
                                         </span>
                                     @endif
 
-                                    @if(!is_null($resp))
+                                    @if(!empty($chips['Replies']))
                                         <span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
-                                            Replies {{ $resp >= 75 ? 'Fast' : ($resp >= 50 ? 'Average' : 'Slow') }}
+                                            {{ $chips['Replies'] }}
                                         </span>
                                     @endif
 
-                                    @if(!is_null($conflictSafety))
+                                    @if(!empty($chips['Conflict']))
                                         <span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
-                                            Conflict Safety {{ (int)$conflictSafety }}
+                                            {{ $chips['Conflict'] }}
                                         </span>
                                     @endif
                                 </div>
@@ -97,11 +87,6 @@
 
                                 {{-- Shared tags: one line, horizontal scroll + arrows --}}
                                 <div class="mt-3">
-                                    @php
-                                        $tagNames = $p->common_tags ?? collect();
-                                        $tagId = 'tags_' . $p->user_id;
-                                    @endphp
-
                                     @if($tagNames->isEmpty())
                                         <div class="text-sm text-gray-600">
                                             <span class="font-medium">No shared tags yet</span>
@@ -115,7 +100,8 @@
                                                 ‹
                                             </button>
 
-                                            <div id="{{ $tagId }}" class="flex gap-2 overflow-x-auto whitespace-nowrap scroll-smooth py-1"
+                                            <div id="{{ $tagId }}"
+                                                 class="flex gap-2 overflow-x-auto whitespace-nowrap scroll-smooth py-1"
                                                  style="scrollbar-width: none;">
                                                 @foreach($tagNames as $t)
                                                     <span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
@@ -164,8 +150,6 @@
 </x-app-layout>
 
 <style type="text/css">
-
 .hide-scrollbar::-webkit-scrollbar { display: none; }
 .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-
 </style>

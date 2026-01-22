@@ -1,0 +1,770 @@
+function el(id) { return document.getElementById(id); }
+
+const state = {
+    booted: false,
+    user: null,
+    status: { has_profile: false, has_quiz: false },
+    rooms: [],
+    activeTab: 'chats',
+    activeRoom: null,
+    matchesSub: 'list',
+    onboardingProfileHtml: null,
+    onboardingQuizHtml: null,
+    messages: [],
+    typing: false,
+    loading: false,
+};
+
+function pushUniqueMessage(msg) {
+  if (!msg) return;
+  const id = Number(msg.id);
+  if (id && state.messages.some(m => Number(m.id) === id)) return;
+  // If the server broadcasts back to the sender, ignore our own message to prevent duplicates.
+  if (msg.user_id != null && state.user?.id != null && String(msg.user_id) === String(state.user.id)) {
+    // If this message is already in the list we returned above; if not, allow push (e.g., first load)
+    if (id && state.messages.some(m => Number(m.id) === id)) return;
+  }
+  state.messages.push(msg);
+}
+
+
+function initials(name) {
+    const parts = (name || '').trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return '?';
+    return (parts[0][0] + (parts[1]?.[0] || '')).toUpperCase();
+}
+
+function setActiveTab(tab) {
+    if (tab !== 'matches') state.matchesSub = 'list';
+    state.activeTab = tab;
+    document.querySelectorAll('.spa-tab').forEach(b => {
+        b.classList.toggle('is-active', b.dataset.tab === tab);
+    });
+    render();
+}
+
+function setTopbar(title, subtitle) {
+    el('spa-title').textContent = title || '';
+    el('spa-subtitle').textContent = subtitle || '';
+}
+
+function setAvatar(text) {
+    el('spa-avatar').textContent = text || '?';
+}
+
+function setAction(html, onClick) {
+    const wrap = document.getElementById('spa-action-wrap');
+    if (!wrap) return;
+    wrap.innerHTML = html || '';
+    const btn = wrap.querySelector('[data-spa-action]');
+    if (btn && typeof onClick === 'function') {
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            onClick();
+        });
+    }
+}
+
+function htmlEscape(s) {
+    return (s ?? '').toString()
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+}
+
+async function apiGet(url, params = {}) {
+    const res = await window.axios.get(url, { params, headers: { 'Accept': 'application/json' } });
+    return res.data;
+}
+async function apiPost(url, data = {}) {
+    const res = await window.axios.post(url, data, { headers: { 'Accept': 'application/json' } });
+    return res.data;
+}
+
+async function boot() {
+    state.loading = true;
+    renderLoading();
+
+    const data = await apiGet('/api/bootstrap');
+    state.user = data.user;
+    state.status = data.status;
+    state.rooms = data.rooms || [];
+    state.booted = true;
+
+    setAvatar(initials(state.user?.name));
+    state.loading = false;
+
+    // Listen for chat list updates (new message/unread changes)
+    window.Echo.private(`user.${state.user.id}`)
+        .listen('.chatlist.updated', (e) => {
+            // Minimal: re-fetch rooms (fast enough now; later optimize by patching)
+            refreshRooms();
+        });
+
+    // Default view
+    setActiveTab('chats');
+    // Preload other tabs in background to feel instant
+    preloadMatchesHtml();
+    preloadProfileHtml();
+    preloadOnboardingProfileHtml();
+    preloadOnboardingQuizHtml();
+}
+
+let cachedMatchesHtml = null;
+let cachedProfileHtml = null;
+let cachedOnboardingProfileHtml = null;
+let cachedOnboardingQuizHtml = null;
+
+async function preloadMatchesHtml() {
+    try {
+        const res = await window.axios.get('/partials/matches', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        cachedMatchesHtml = res.data;
+    } catch {}
+}
+async function preloadProfileHtml() {
+    try {
+        const res = await window.axios.get('/partials/profile', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        cachedProfileHtml = res.data;
+    } catch {}
+}
+
+
+async function preloadOnboardingProfileHtml() {
+    try {
+        const res = await window.axios.get('/partials/onboarding-profile', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        cachedOnboardingProfileHtml = res.data;
+    } catch {}
+}
+async function preloadOnboardingQuizHtml() {
+    try {
+        const res = await window.axios.get('/partials/onboarding-quiz', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        cachedOnboardingQuizHtml = res.data;
+    } catch {}
+}
+
+
+async function refreshRooms() {
+    try {
+        const data = await apiGet('/api/bootstrap');
+        state.rooms = data.rooms || [];
+        if (state.activeTab === 'chats' && !state.activeRoom) renderChatsList();
+    } catch {}
+}
+
+function renderLoading() {
+    const view = el('spa-view');
+    view.innerHTML = `
+        <div class="p-6">
+            <div class="animate-pulse space-y-3">
+                <div class="h-4 bg-gray-200 rounded w-1/2"></div>
+                <div class="h-12 bg-gray-200 rounded"></div>
+                <div class="h-12 bg-gray-200 rounded"></div>
+                <div class="h-12 bg-gray-200 rounded"></div>
+            </div>
+        </div>
+    `;
+}
+
+function render() {
+    if (state.loading || !state.booted) return renderLoading();
+
+    if (state.activeTab === 'chats') {
+        if (state.activeRoom) return renderChatRoom();
+        return renderChatsList();
+    }
+
+    if (state.activeTab === 'matches') return renderMatches();
+    if (state.activeTab === 'profile') return renderProfile();
+}
+
+function renderChatsList() {
+    setTopbar('Chats', '');
+    setAvatar(initials(state.user?.name));
+    setAction(
+        `<button data-spa-action class="h-9 w-9 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center" title="New chat">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-700" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z"/>
+            </svg>
+        </button>`,
+        () => setActiveTab('matches')
+    );
+
+    const view = el('spa-view');
+    if (!state.rooms.length) {
+        view.innerHTML = `
+            <div class="p-6 text-center">
+                <div class="text-gray-800 font-semibold">No chats yet</div>
+                <div class="text-gray-500 text-sm mt-1">Start matching to begin chatting.</div>
+                <a href="/match" class="inline-block mt-4 px-4 py-2 rounded-full bg-purple-600 text-white">Find matches</a>
+            </div>
+        `;
+        return;
+    }
+
+    view.innerHTML = `
+        <div class="p-3">
+            <div class="relative mb-3">
+                <input id="spa-search" class="w-full rounded-full border-gray-200 bg-gray-50 pl-10 pr-4 py-2 text-sm focus:ring-purple-500 focus:border-purple-500" placeholder="Search"/>
+                <div class="absolute left-3 top-2.5 text-gray-400">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M12.9 14.32a8 8 0 111.414-1.414l3.387 3.387a1 1 0 01-1.414 1.414l-3.387-3.387zM14 8a6 6 0 11-12 0 6 6 0 0112 0z" clip-rule="evenodd"/>
+                    </svg>
+                </div>
+            </div>
+
+            <div id="spa-room-list" class="space-y-1"></div>
+        </div>
+    `;
+
+    const list = document.getElementById('spa-room-list');
+    const renderList = (q = '') => {
+        const query = q.trim().toLowerCase();
+        const items = state.rooms.filter(r => {
+            const name = r.other_user?.name || '';
+            return !query || name.toLowerCase().includes(query);
+        });
+
+        list.innerHTML = items.map(r => {
+            const name = r.other_user?.name || 'User';
+            const last = r.typing ? 'Typing…' : (r.last_message?.body || '');
+            const time = r.last_message?.created_at ? new Date(r.last_message.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
+            const unread = r.unread_count || 0;
+
+            return `
+                <button class="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-gray-50 text-left" data-room-id="${r.id}" data-room-uuid="${r.uuid}">
+                    <div class="h-11 w-11 rounded-full bg-purple-100 text-purple-700 flex items-center justify-center font-semibold">
+                        ${htmlEscape(initials(name))}
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center justify-between">
+                            <div class="font-semibold text-sm truncate">${htmlEscape(name)}</div>
+                            <div class="text-[11px] text-gray-400 ml-2">${htmlEscape(time)}</div>
+                        </div>
+                        <div class="flex items-center justify-between mt-1">
+                            <div class="text-xs ${r.typing ? 'text-purple-600 font-semibold' : 'text-gray-500'} truncate">${htmlEscape(last)}</div>
+                            ${unread ? `<span class="ml-2 text-[11px] bg-purple-600 text-white rounded-full px-2 py-0.5">${unread}</span>` : ``}
+                        </div>
+                    </div>
+                </button>
+            `;
+        }).join('');
+    };
+
+    renderList();
+
+    const search = document.getElementById('spa-search');
+    search.addEventListener('input', () => renderList(search.value));
+
+    list.querySelectorAll('button[data-room-id]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const roomId = btn.dataset.roomId;
+            const roomUuid = btn.dataset.roomUuid;
+            await openRoom(roomId, roomUuid);
+        });
+    });
+}
+
+let roomChannel = null;
+
+async function openRoom(roomId, roomUuid) {
+    state.activeRoom = { id: roomId, uuid: roomUuid };
+    state.messages = [];
+    state.typing = false;
+
+    // subscribe to room events
+    if (roomChannel) {
+        try { roomChannel.stopListening('.message.sent'); } catch {}
+        try { window.Echo.leave(`private-chat.room.${state.activeRoom.uuid}`); } catch {}
+    }
+
+    roomChannel = window.Echo.private(`chat.room.${roomUuid}`)
+        .listen('.message.sent', (e) => {
+            pushUniqueMessage(e.message);
+            renderChatMessages(false);
+        })
+        .listen('.typing.updated', (e) => {
+            // Ignore my own typing echo
+            if (String(e.userId) === String(state.user?.id)) return;
+            state.typing = !!e.typing;
+            renderTyping();
+        })
+        .listen('.message.seen', (e) => {
+            // When the other user reads, mark my messages up to messageId as read.
+            if (!e || !e.messageId) return;
+            const me = state.user?.id;
+            state.messages.forEach(m => {
+                if (String(m.user_id) === String(me) && Number(m.id) <= Number(e.messageId)) {
+                    m.read_at = e.readAt || (m.read_at ?? new Date().toISOString());
+                }
+            });
+            renderChatMessages(false);
+        })
+        .listen('.reaction.updated', (e) => {
+            const msg = state.messages.find(m => m.id === e.messageId);
+            if (msg) {
+                msg.heart_count = e.heartCount;
+                if (String(e.userId) === String(state.user?.id)) msg.my_hearted = !!e.hearted;
+            }
+            renderChatMessages(false);
+        })
+        .listen('.message.deleted', (e) => {
+            state.messages = state.messages.filter(m => m.id !== e.messageId);
+            renderChatMessages(false);
+        })
+        .listen('.chat.closed', (e) => {
+            renderChatRoom(); // will disable input
+        });
+
+    renderChatRoom();
+    await loadLatestMessages();
+}
+
+async function loadLatestMessages() {
+    const data = await apiGet(`/chat/${state.activeRoom.uuid}/messages`, { limit: 30 });
+    state.messages = (data.items || []);
+    renderChatMessages(true);
+}
+
+function renderChatRoom() {
+    const room = state.rooms.find(r => String(r.id) === String(state.activeRoom.id));
+    const name = room?.other_user?.name || 'Chat';
+    setTopbar(name, state.typing ? 'Typing…' : '');
+    setAvatar(initials(name));
+
+    // Right-side action = delete chat (trash)
+    setAction(
+        `<button data-spa-action class="h-9 w-9 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center" title="Delete chat">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+                <path d="M10 11v6"/>
+                <path d="M14 11v6"/>
+                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+            </svg>
+        </button>`,
+        async () => {
+            if (!confirm('Delete this chat?')) return;
+            await apiPost(`/chat/${state.activeRoom.uuid}/delete-chat`, {});
+            state.activeRoom = null;
+            await refreshRooms();
+            render();
+        }
+    );
+
+    const closed = !!room?.closed_at;
+
+    const view = el('spa-view');
+    view.innerHTML = `
+        <div class="h-full flex flex-col">
+            <div class="px-3 py-2 border-b bg-white flex items-center justify-between">
+                <button id="spa-back" class="text-purple-700 text-sm font-semibold">← Back</button>
+                <div class="text-xs text-gray-500">${closed ? 'Chat closed' : ''}</div>
+            </div>
+
+            <div id="spa-messages" class="flex-1 overflow-y-auto px-3 py-3 bg-gray-50"></div>
+
+            <div id="spa-typing" class="px-4 pb-1 text-[11px] text-gray-500 hidden">Typing…</div>
+
+            <div class="p-3 border-t bg-white">
+                <form id="spa-send-form" class="flex items-center gap-2">
+                    <input id="spa-input" class="flex-1 rounded-full border-gray-200 bg-gray-50 px-4 py-2 text-sm focus:ring-purple-500 focus:border-purple-500"
+                           placeholder="${closed ? 'Chat closed' : 'Type a message…'}" ${closed ? 'disabled' : ''} autocomplete="off" />
+                    <button class="h-10 px-4 rounded-full bg-purple-600 text-white text-sm font-semibold disabled:opacity-50" ${closed ? 'disabled' : ''}>Send</button>
+                </form>
+            </div>
+        </div>
+    `;
+
+    el('spa-back').onclick = () => {
+        state.activeRoom = null;
+        render();
+    };
+
+    renderChatMessages(true);
+
+    if (!closed) {
+        const input = document.getElementById('spa-input');
+        let typingTimer = null;
+
+        input.addEventListener('input', () => {
+            apiPost(`/chat/${state.activeRoom.uuid}/typing`, { typing: true }).catch(()=>{});
+            clearTimeout(typingTimer);
+            typingTimer = setTimeout(() => {
+                apiPost(`/chat/${state.activeRoom.uuid}/typing`, { typing: false }).catch(()=>{});
+            }, 900);
+        });
+
+        document.getElementById('spa-send-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const body = input.value.trim();
+            if (!body) return;
+
+            input.value = '';
+            const res = await apiPost(`/chat/${state.activeRoom.uuid}/send`, { body });
+
+            // Instant feedback (sender does not receive `toOthers()` broadcasts)
+            if (res?.message) {
+                pushUniqueMessage(res.message);
+                renderChatMessages(true);
+            }
+        });
+    }
+}
+
+function renderChatMessages(scrollToBottom) {
+    const box = document.getElementById('spa-messages');
+    if (!box) return;
+
+    const me = state.user?.id;
+
+    box.innerHTML = state.messages.map(m => {
+        const mine = String(m.user_id) === String(me);
+        const t = m.created_at ? new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
+        const seen = mine && m.read_at;
+        const hearts = Number(m.heart_count || 0);
+        const myHearted = !!m.my_hearted;
+        const body = (m.body === null || typeof m.body === 'undefined')
+            ? '<span class="italic opacity-70">Message deleted</span>'
+            : htmlEscape(m.body);
+
+        return `
+            <div class="flex ${mine ? 'justify-end' : 'justify-start'} mb-2">
+                <div class="${mine ? 'bg-purple-600 text-white' : 'bg-white text-gray-900'} max-w-[82%] rounded-2xl px-4 py-2 shadow-sm">
+                    <div class="text-sm whitespace-pre-wrap break-words">${body}</div>
+                    <div class="mt-1 flex items-center justify-end gap-2 text-[10px] ${mine ? 'text-purple-100' : 'text-gray-400'}">
+                        <span>${htmlEscape(t)}${seen ? ' · Seen' : ''}</span>
+                        <button class="inline-flex items-center gap-1" data-heart="${m.id}" title="React">
+                            <span>${myHearted ? '❤' : '♡'}</span>${hearts ? `<span>${hearts}</span>` : ``}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    // Wire heart buttons
+    box.querySelectorAll('button[data-heart]').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const id = btn.dataset.heart;
+            try {
+                const res = await apiPost(`/chat/${state.activeRoom.uuid}/message/${id}/react`, {});
+                // Optimistic toggle: API returns heart_count & hearted
+                const msg = state.messages.find(m => String(m.id) === String(id));
+                if (msg && res) {
+                    msg.my_hearted = !!res.hearted;
+                    msg.heart_count = res.heart_count ?? msg.heart_count;
+                }
+                renderChatMessages(false);
+            } catch {}
+        });
+    });
+
+    if (scrollToBottom) {
+        box.scrollTop = box.scrollHeight;
+    }
+}
+
+function renderTyping() {
+    const t = document.getElementById('spa-typing');
+    if (!t) return;
+    t.classList.toggle('hidden', !state.typing);
+    el('spa-subtitle').textContent = state.typing ? 'Typing…' : '';
+}
+
+async function renderMatches() {
+    setTopbar('Matches', 'People you matched with');
+    setAvatar(initials(state.user?.name));
+
+    // Right-side action = profile card (opens profile tab)
+    setAction(
+        `<button data-spa-action class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-gray-100 hover:bg-gray-200" title="Edit profile">
+            <span class="h-7 w-7 rounded-full bg-purple-600 text-white flex items-center justify-center text-xs font-semibold">${htmlEscape(initials(state.user?.name))}</span>
+            <span class="text-xs font-semibold text-gray-800">Edit profile</span>
+        </button>`,
+        () => { state.matchesSub = 'profile'; render(); }
+    );
+    const view = el('spa-view');
+
+    // If user hasn't completed onboarding, show the flow hint (server-rendered pages still exist).
+    if (!state.status.has_profile) {
+        view.innerHTML = `
+            <div class="p-6">
+                <div class="text-lg font-semibold">Complete your profile</div>
+                <div class="text-sm text-gray-500 mt-1">We need your Match Profile before showing matches.</div>
+                <button type="button" data-spa-open-match-profile class="inline-block mt-4 px-4 py-2 rounded-full bg-purple-600 text-white">Start</button>
+            </div>
+        `;
+        wireMatchActions(view);
+        return;
+    }
+    if (!state.status.has_quiz) {
+        view.innerHTML = `
+            <div class="p-6">
+                <div class="text-lg font-semibold">Serious Compatibility</div>
+                <div class="text-sm text-gray-500 mt-1">Answer the short quiz to unlock better matching.</div>
+                <button type="button" data-spa-open-match-quiz class="inline-block mt-4 px-4 py-2 rounded-full bg-purple-600 text-white">Continue</button>
+            </div>
+        `;
+        wireMatchActions(view);
+        return;
+    }
+
+
+    // Match profile / Serious compatibility inside SPA (no refresh)
+    if (state.matchesSub === 'profile') {
+        setTopbar('Match profile', 'Your preferences for matching');
+        setAvatar(initials(state.user?.name));
+        setAction(
+            `<button data-spa-action class="text-xs font-semibold px-3 py-1.5 rounded-full bg-gray-100 hover:bg-gray-200">Back</button>`,
+            () => { state.matchesSub = 'list'; render(); }
+        );
+
+        if (cachedOnboardingProfileHtml) {
+            view.innerHTML = `<div class="p-3">${cachedOnboardingProfileHtml}</div>`;
+            wireAjaxForms(view);
+            wireAjaxLinks(view);
+            // After submit, server will return JSON next step; handled in wireAjaxForms.
+            return;
+        }
+        view.innerHTML = `<div class="p-6 text-sm text-gray-500">Loading…</div>`;
+        await preloadOnboardingProfileHtml();
+        return renderMatches();
+    }
+
+    if (state.matchesSub === 'quiz') {
+        setTopbar('Serious Compatibility', 'Answer a few quick questions');
+        setAvatar(initials(state.user?.name));
+        setAction(
+            `<button data-spa-action class="text-xs font-semibold px-3 py-1.5 rounded-full bg-gray-100 hover:bg-gray-200">Back</button>`,
+            () => { state.matchesSub = 'profile'; render(); }
+        );
+
+        if (cachedOnboardingQuizHtml) {
+            view.innerHTML = `<div class="p-3">${cachedOnboardingQuizHtml}</div>`;
+            wireAjaxForms(view);
+            wireAjaxLinks(view);
+            return;
+        }
+        view.innerHTML = `<div class="p-6 text-sm text-gray-500">Loading…</div>`;
+        await preloadOnboardingQuizHtml();
+        return renderMatches();
+    }
+    // Use cached server-rendered HTML for now (keeps your existing scoring logic intact).
+    if (cachedMatchesHtml) {
+        view.innerHTML = `
+            <div class="p-3">
+                <div class="bg-white border rounded-xl overflow-hidden">
+                    ${cachedMatchesHtml}
+                </div>
+            </div>
+        `;
+        wireAjaxLinks(view);
+        wireMatchActions(view);
+        return;
+    }
+
+    view.innerHTML = `<div class="p-6 text-sm text-gray-500">Loading matches…</div>`;
+    await preloadMatchesHtml();
+    return renderMatches();
+}
+
+async function renderProfile() {
+    setTopbar('Profile', 'Account & settings');
+    setAvatar(initials(state.user?.name));
+    setAction(
+        `<div></div>`,
+        null
+    );
+    const view = el('spa-view');
+
+    if (cachedProfileHtml) {
+        view.innerHTML = `
+            <div class="p-3">
+                <div class="bg-white border rounded-xl overflow-hidden">
+                    ${cachedProfileHtml}
+                </div>
+            </div>
+        `;
+        wireAjaxForms(view);
+        wireAjaxLinks(view);
+        return;
+    }
+
+    view.innerHTML = `<div class="p-6 text-sm text-gray-500">Loading…</div>`;
+    await preloadProfileHtml();
+    return renderProfile();
+}
+
+function wireAjaxLinks(root) {
+    // Intercept internal links to keep SPA feel (basic).
+    root.querySelectorAll('a[href^="/"]').forEach(a => {
+        const href = a.getAttribute('href');
+        if (!href) return;
+        a.addEventListener('click', async (e) => {
+            // allow normal for logout etc
+            if (href === '/logout') return;
+            e.preventDefault();
+
+            // SPA routing shortcuts
+            if (href.startsWith('/profile')) return setActiveTab('profile');
+            if (href.startsWith('/match')) return setActiveTab('matches');
+            if (href.startsWith('/chat/')) {
+                // href like /chat/{uuid}
+                const uuid = href.split('/chat/')[1]?.split('?')[0];
+                const room = state.rooms.find(r => r.uuid === uuid);
+                if (room) return openRoom(room.id, room.uuid);
+                // fallback: refresh rooms then try again
+                await refreshRooms();
+                const room2 = state.rooms.find(r => r.uuid === uuid);
+                if (room2) return openRoom(room2.id, room2.uuid);
+            }
+
+            // For onboarding pages keep normal navigation (full pages)
+            window.location.href = href;
+        });
+    });
+}
+
+function wireMatchActions(root) {
+    // Start chat buttons (preferred)
+    root.querySelectorAll('[data-spa-start-chat]').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const uid = btn.getAttribute('data-spa-start-chat');
+            if (!uid) return;
+            try {
+                const res = await apiPost(`/match/start/${uid}`, {});
+                const room = res?.room;
+                if (room?.uuid) {
+                    await refreshRooms();
+                    const found = state.rooms.find(r => r.uuid === room.uuid) || room;
+                    // Switch to Chats tab and open
+                    state.matchesSub = 'list';
+                    setActiveTab('chats');
+                    return openRoom(found.id, found.uuid);
+                }
+            } catch (err) {
+                console.error(err);
+                alert('Could not start chat.');
+            }
+        });
+    });
+
+    // Backward compatibility: intercept old Start Chat forms if any remain
+    root.querySelectorAll('form[action*="/match/start/"]').forEach(form => {
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const action = form.getAttribute('action');
+            if (!action) return;
+            try {
+                const res = await window.axios.post(action, new FormData(form), {
+                    headers: { 'Accept': 'application/json' },
+                });
+                const room = res.data?.room;
+                if (room?.uuid) {
+                    await refreshRooms();
+                    const found = state.rooms.find(r => r.uuid === room.uuid) || room;
+                    state.matchesSub = 'list';
+                    setActiveTab('chats');
+                    return openRoom(found.id, found.uuid);
+                }
+            } catch (err) {
+                console.error(err);
+                alert('Could not start chat.');
+            }
+        });
+    });
+
+    // Edit match-profile links inside matches partial
+    root.querySelectorAll('[data-spa-open-match-profile]').forEach(a => {
+        a.addEventListener('click', (e) => {
+            e.preventDefault();
+            state.matchesSub = 'profile';
+            render();
+        });
+    });
+
+    root.querySelectorAll('[data-spa-open-match-quiz]').forEach(a => {
+        a.addEventListener('click', (e) => {
+            e.preventDefault();
+            state.matchesSub = 'quiz';
+            render();
+        });
+    });
+
+}
+
+
+function wireAjaxForms(root) {
+    root.querySelectorAll('form').forEach(form => {
+        form.addEventListener('submit', async (e) => {
+            // If the form doesn't have action, skip.
+            const action = form.getAttribute('action');
+            if (!action) return;
+
+            e.preventDefault();
+
+            const methodInput = form.querySelector('input[name="_method"]');
+            const method = (methodInput?.value || form.getAttribute('method') || 'POST').toUpperCase();
+
+            const fd = new FormData(form);
+            // Laravel expects _method for PATCH/PUT/DELETE in POST; we'll keep that.
+            try {
+                const res = await window.axios({
+                    url: action,
+                    method: method === 'GET' ? 'GET' : 'POST',
+                    data: fd,
+                    headers: { 'Accept': 'application/json' },
+                });
+
+                // Handle SPA forms
+                const next = res.data?.next || null;
+                const ok = res.data?.ok ?? true;
+
+                // Onboarding flow (match profile / serious compatibility)
+                if (action.startsWith('/onboarding')) {
+                    // update status
+                    if (action === '/onboarding') state.status.has_profile = true;
+                    if (action.startsWith('/onboarding/quiz')) state.status.has_quiz = true;
+
+                    if (next && next.includes('/onboarding/quiz')) {
+                        state.matchesSub = 'quiz';
+                        cachedOnboardingQuizHtml = null;
+                        await preloadOnboardingQuizHtml();
+                        return render();
+                    }
+                    // Finished quiz -> go back to matches list
+                    state.matchesSub = 'list';
+                    cachedMatchesHtml = null;
+                    await preloadMatchesHtml();
+                    return render();
+                }
+
+                // Profile/account settings (Breeze)
+                cachedProfileHtml = null;
+                await preloadProfileHtml();
+                renderProfile();
+            } catch (err) {
+                // fall back: show server validation errors (if any)
+                alert('Could not save. Please check your inputs.');
+            }
+        });
+    });
+}
+
+// Mount
+document.addEventListener('DOMContentLoaded', () => {
+    if (!el('spa-root')) return;
+
+    document.querySelectorAll('.spa-tab').forEach(btn => {
+        btn.addEventListener('click', () => setActiveTab(btn.dataset.tab));
+    });
+
+    boot().catch((e) => {
+        console.error(e);
+        el('spa-view').innerHTML = `<div class="p-6 text-sm text-red-600">Failed to load app.</div>`;
+    });
+});

@@ -2,6 +2,7 @@
 
 namespace Database\Seeders;
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
 use App\Models\Tag;
@@ -15,8 +16,11 @@ class TagSeeder extends Seeder
             'Supportive', 'Artistic', 'Funny', 'Anime', 'Gaming', 'Business',
         ];
 
-        foreach ($tags as $t) {
-            Tag::firstOrCreate(['name' => $t]);
+        foreach ($tags as $name) {
+            DB::table('tags')->updateOrInsert(
+                ['name' => $name],
+                ['created_at' => now(), 'updated_at' => now()]
+            );
         }
     }
 }

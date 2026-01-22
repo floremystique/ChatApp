@@ -2,6 +2,13 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\ChatClosed;
+use App\Events\ChatListUpdated;
+use App\Events\MessageDeleted;
+use App\Events\MessageSent;
+use App\Events\ReactionUpdated;
+use App\Events\SeenUpdated;
+use App\Events\TypingUpdated;
 use App\Models\ChatRoom;
 use App\Models\Message;
 use App\Models\MessageReaction;
@@ -13,7 +20,7 @@ class ChatController extends Controller
 {
     private function ensureParticipant(ChatRoom $room): void
     {
-        if (!in_array(auth()->id(), [$room->user_one, $room->user_two])) {
+        if (!in_array((int)auth()->id(), [(int)$room->user_one, (int)$room->user_two], true)) {
             abort(403);
         }
     }
@@ -25,48 +32,52 @@ class ChatController extends Controller
         }
     }
 
-    public function index()
+    private function otherUserId(ChatRoom $room, int $me): int
     {
-        $me = auth()->id();
-
-        // NOTE: this can be optimized further with joins + subqueries (for huge scale).
-        $rooms = ChatRoom::query()
-            ->where('user_one', $me)
-            ->orWhere('user_two', $me)
-            ->with(['lastMessage'])
-            ->orderByDesc(
-                Message::select('created_at')
-                    ->whereColumn('chat_rooms.id', 'messages.chat_room_id')
-                    ->latest()
-                    ->take(1)
-            )
-            ->get()
-            ->map(function ($room) use ($me) {
-                $otherId = ($room->user_one == $me) ? $room->user_two : $room->user_one;
-                $room->other_user = \App\Models\User::find($otherId);
-
-                $room->unread_count = Message::where('chat_room_id', $room->id)
-                    ->whereNull('read_at')
-                    ->where('user_id', '!=', $me)
-                    ->count();
-
-                return $room;
-            });
-
-        return view('chat.index', compact('rooms'));
+        return ((int)$room->user_one === (int)$me) ? (int)$room->user_two : (int)$room->user_one;
     }
 
+    /**
+     * SPA-safe: this endpoint should never return HTML.
+     */
     public function show(ChatRoom $room)
     {
         $this->ensureParticipant($room);
 
-        // mark other user's messages as read
-        Message::where('chat_room_id', $room->id)
-            ->where('user_id', '!=', auth()->id())
-            ->whereNull('read_at')
-            ->update(['read_at' => now()]);
+        $me = (int)auth()->id();
 
-        return view('chat.show', compact('room'));
+        // Mark other user's messages as read when opening the chat
+        $lastReadId = Message::where('chat_room_id', $room->id)
+            ->where('user_id', '!=', $me)
+            ->whereNull('read_at')
+            ->max('id');
+
+        if ($lastReadId) {
+            Message::where('chat_room_id', $room->id)
+                ->where('user_id', '!=', $me)
+                ->whereNull('read_at')
+                ->update(['read_at' => now()]);
+
+            // Notify the other user that messages were seen
+            broadcast(new SeenUpdated($room->uuid, $me, (int)$lastReadId, now()->toISOString()))->toOthers();
+        }
+
+        // Update unread counts for both users in real-time
+        $this->broadcastChatListForBoth($room);
+
+        $otherId = $this->otherUserId($room, $me);
+        $other = \App\Models\User::select('id', 'name')->find($otherId);
+
+        return response()->json([
+            'ok' => true,
+            'room' => [
+                'id' => $room->id,
+                'uuid' => $room->uuid,
+                'other_user' => $other ? ['id' => $other->id, 'name' => $other->name] : null,
+                'closed_at' => optional($room->closed_at)->toISOString(),
+                'closed_by' => $room->closed_by,
+            ],
+        ]);
     }
 
     public function send(Request $request, ChatRoom $room)
@@ -79,6 +90,8 @@ class ChatController extends Controller
             'reply_to_id' => ['nullable', 'integer'],
         ]);
 
+        $me = (int)auth()->id();
+
         $replyToId = $data['reply_to_id'] ?? null;
         if ($replyToId) {
             $exists = Message::where('chat_room_id', $room->id)->where('id', $replyToId)->exists();
@@ -88,16 +101,25 @@ class ChatController extends Controller
         }
 
         $msg = $room->messages()->create([
-            'user_id' => auth()->id(),
+            'user_id' => $me,
             'body' => $data['body'],
             'reply_to_id' => $replyToId,
         ]);
 
+        $msg = $msg->fresh(['replyTo:id,user_id,body,deleted_at,created_at']);
+        $serialized = $this->serializeMessage($msg, $me);
+
         $this->updateReplyStats($room, $msg);
+
+        // Realtime message for the other participant
+        broadcast(new MessageSent($room->uuid, $serialized))->toOthers();
+
+        // Update chat list + unread counts for both participants
+        $this->broadcastChatListForBoth($room);
 
         return response()->json([
             'ok' => true,
-            'message' => $this->serializeMessage($msg, auth()->id()),
+            'message' => $serialized,
         ]);
     }
 
@@ -105,16 +127,26 @@ class ChatController extends Controller
     {
         $this->ensureParticipant($room);
 
-        // mark OTHER user's unread messages as read whenever this endpoint is hit
-        Message::where('chat_room_id', $room->id)
-            ->where('user_id', '!=', auth()->id())
+        $me = (int)auth()->id();
+
+        // Mark OTHER user's unread messages as read whenever this endpoint is hit
+        $lastReadId = Message::where('chat_room_id', $room->id)
+            ->where('user_id', '!=', $me)
             ->whereNull('read_at')
-            ->update(['read_at' => now()]);
+            ->max('id');
+
+        if ($lastReadId) {
+            Message::where('chat_room_id', $room->id)
+                ->where('user_id', '!=', $me)
+                ->whereNull('read_at')
+                ->update(['read_at' => now()]);
+
+            broadcast(new SeenUpdated($room->uuid, $me, (int)$lastReadId, now()->toISOString()))->toOthers();
+            $this->broadcastChatListForBoth($room);
+        }
 
         $limit = (int)($request->get('limit', 30));
         $limit = max(10, min($limit, 60));
-
-        $me = auth()->id();
 
         $afterId = $request->get('after_id');
         if ($afterId) {
@@ -134,7 +166,7 @@ class ChatController extends Controller
                 ->get();
 
             return response()->json([
-                'items' => $items->map(fn ($m) => $this->serializeMessage($m, $me))->values(),
+                'items' => $items->map(fn($m) => $this->serializeMessage($m, $me))->values(),
                 'next_before_id' => null,
                 'has_more' => false,
                 'chat_closed_at' => optional($room->closed_at)->toISOString(),
@@ -164,11 +196,97 @@ class ChatController extends Controller
         $itemsAsc = $itemsDesc->reverse()->values();
 
         return response()->json([
-            'items' => $itemsAsc->map(fn ($m) => $this->serializeMessage($m, $me))->values(),
+            'items' => $itemsAsc->map(fn($m) => $this->serializeMessage($m, $me))->values(),
             'next_before_id' => $itemsDesc->count() ? $itemsDesc->last()->id : null,
             'has_more' => $itemsDesc->count() === $limit,
             'chat_closed_at' => optional($room->closed_at)->toISOString(),
             'chat_closed_by' => $room->closed_by,
+        ]);
+    }
+
+    public function typing(Request $request, ChatRoom $room)
+    {
+        $this->ensureParticipant($room);
+
+        $me = (int)auth()->id();
+        $typing = (bool)$request->boolean('typing');
+        $until = $typing ? now()->addSeconds(2) : now();
+
+        if ((int)$room->user_one === $me) {
+            $room->user_one_typing_until = $until;
+        } else {
+            $room->user_two_typing_until = $until;
+        }
+        $room->save();
+
+        \Log::info('Broadcast debug', [
+            'default' => config('broadcasting.default'),
+            'reverb'  => config('broadcasting.connections.reverb'),
+            'pusher'  => config('broadcasting.connections.pusher'),
+        ]);
+
+        broadcast(new TypingUpdated($room->uuid, $me, $typing))->toOthers();
+
+        // Let the other user update chat-list typing indicator
+        $this->broadcastChatListForBoth($room);
+
+        return response()->json(['ok' => true]);
+    }
+
+    public function typingStatus(ChatRoom $room)
+    {
+        $this->ensureParticipant($room);
+        $me = (int)auth()->id();
+
+        $otherTypingUntil = ((int)$room->user_one === $me)
+            ? $room->user_two_typing_until
+            : $room->user_one_typing_until;
+
+        return response()->json([
+            'ok' => true,
+            'typing' => $otherTypingUntil ? $otherTypingUntil->isFuture() : false,
+        ]);
+    }
+
+    public function seen(Request $request, ChatRoom $room)
+    {
+        // Explicit endpoint (optional) to mark messages seen
+        $this->ensureParticipant($room);
+
+        $me = (int)auth()->id();
+        $lastReadId = Message::where('chat_room_id', $room->id)
+            ->where('user_id', '!=', $me)
+            ->whereNull('read_at')
+            ->max('id');
+
+        if ($lastReadId) {
+            Message::where('chat_room_id', $room->id)
+                ->where('user_id', '!=', $me)
+                ->whereNull('read_at')
+                ->update(['read_at' => now()]);
+
+            broadcast(new SeenUpdated($room->uuid, $me, (int)$lastReadId, now()->toISOString()))->toOthers();
+            $this->broadcastChatListForBoth($room);
+        }
+
+        return response()->json(['ok' => true]);
+    }
+
+    public function seenStatus(ChatRoom $room)
+    {
+        $this->ensureParticipant($room);
+
+        // For the current viewer: their latest read message is not very meaningful.
+        // We'll return last read_at for the room.
+        $last = Message::where('chat_room_id', $room->id)
+            ->whereNotNull('read_at')
+            ->orderByDesc('id')
+            ->first();
+
+        return response()->json([
+            'ok' => true,
+            'message_id' => $last?->id,
+            'read_at' => optional($last?->read_at)->toISOString(),
         ]);
     }
 
@@ -180,7 +298,7 @@ class ChatController extends Controller
             abort(404);
         }
 
-        $me = auth()->id();
+        $me = (int)auth()->id();
 
         $out = DB::transaction(function () use ($me, $message) {
             $existing = MessageReaction::where('message_id', $message->id)
@@ -207,6 +325,8 @@ class ChatController extends Controller
             return ['hearted' => $hearted, 'heart_count' => $count];
         });
 
+        broadcast(new ReactionUpdated($room->uuid, (int)$message->id, (int)$out['heart_count'], $me, (bool)$out['hearted']))->toOthers();
+
         return response()->json(['ok' => true] + $out);
     }
 
@@ -218,17 +338,18 @@ class ChatController extends Controller
             abort(404);
         }
 
-        if ((int)$message->user_id !== (int)auth()->id()) {
-            abort(403);
-        }
+        $me = (int)auth()->id();
 
-        if (!$message->deleted_at) {
-            $message->deleted_at = now();
-            $message->deleted_by = auth()->id();
-            $message->save();
-        }
+        $message->update([
+            'body' => null,
+            'deleted_at' => now(),
+            'deleted_by' => $me,
+        ]);
 
-        return response()->json(['ok' => true, 'id' => $message->id]);
+        broadcast(new MessageDeleted($room->uuid, (int)$message->id))->toOthers();
+        $this->broadcastChatListForBoth($room);
+
+        return response()->json(['ok' => true]);
     }
 
     public function deleteChat(Request $request, ChatRoom $room)
@@ -236,128 +357,74 @@ class ChatController extends Controller
         $this->ensureParticipant($room);
 
         if (!$room->closed_at) {
-            $room->closed_at = now();
-            $room->closed_by = auth()->id();
-            $room->save();
+            $room->update([
+                'closed_at' => now(),
+                'closed_by' => (int)auth()->id(),
+            ]);
+
+            broadcast(new ChatClosed($room->uuid, optional($room->closed_at)->toISOString(), (int)auth()->id()))->toOthers();
+            $this->broadcastChatListForBoth($room);
         }
-
-        return response()->json([
-            'ok' => true,
-            'closed_at' => optional($room->closed_at)->toISOString(),
-            'closed_by' => $room->closed_by,
-        ]);
-    }
-
-    public function typing(Request $request, ChatRoom $room)
-    {
-        $request->validate(['typing' => 'required|boolean']);
-
-        $me = auth()->id();
-        $until = $request->boolean('typing') ? now()->addSeconds(3) : null;
-
-        if ($room->user_one == $me) {
-            $room->user_one_typing_until = $until;
-        } elseif ($room->user_two == $me) {
-            $room->user_two_typing_until = $until;
-        } else {
-            abort(403);
-        }
-
-        $room->save();
 
         return response()->json(['ok' => true]);
     }
 
-    public function typingStatus(ChatRoom $room)
+    private function serializeMessage(Message $m, int $me): array
     {
-        $me = auth()->id();
-
-        if (!in_array($me, [$room->user_one, $room->user_two])) {
-            abort(403);
-        }
-
-        $otherTypingUntil = ($room->user_one == $me)
-            ? $room->user_two_typing_until
-            : $room->user_one_typing_until;
-
-        $isTyping = $otherTypingUntil && now()->lt($otherTypingUntil);
-
-        return response()->json(['typing' => $isTyping]);
-    }
-
-    public function seenStatus(ChatRoom $room)
-    {
-        $this->ensureParticipant($room);
-
-        $lastMine = Message::where('chat_room_id', $room->id)
-            ->where('user_id', auth()->id())
-            ->latest('id')
-            ->first(['id', 'read_at']);
-
-        return response()->json([
-            'id' => $lastMine?->id,
-            'read_at' => optional($lastMine?->read_at)->toISOString(),
-        ]);
-    }
-
-    private function serializeMessage(Message $msg, int $me): array
-    {
+        // If message is deleted, we keep body null so UI can show a placeholder.
         $reply = null;
-        if ($msg->reply_to_id && $msg->relationLoaded('replyTo') && $msg->replyTo) {
+        if ($m->relationLoaded('replyTo') && $m->replyTo) {
             $reply = [
-                'id' => $msg->replyTo->id,
-                'user_id' => $msg->replyTo->user_id,
-                'created_at' => optional($msg->replyTo->created_at)->toISOString(),
-                'deleted_at' => optional($msg->replyTo->deleted_at)->toISOString(),
-                'body_preview' => $msg->replyTo->deleted_at ? null : mb_substr((string)$msg->replyTo->body, 0, 140),
+                'id' => $m->replyTo->id,
+                'user_id' => $m->replyTo->user_id,
+                'body' => $m->replyTo->body,
+                'deleted_at' => optional($m->replyTo->deleted_at)->toISOString(),
+                'created_at' => optional($m->replyTo->created_at)->toISOString(),
             ];
         }
 
         return [
-            'id' => $msg->id,
-            'chat_room_id' => $msg->chat_room_id,
-            'user_id' => $msg->user_id,
-            'body' => $msg->deleted_at ? null : $msg->body,
-            'deleted_at' => optional($msg->deleted_at)->toISOString(),
-            'reply_to_id' => $msg->reply_to_id,
+            'id' => $m->id,
+            'chat_room_id' => $m->chat_room_id,
+            'user_id' => $m->user_id,
+            'body' => $m->body,
+            'reply_to_id' => $m->reply_to_id,
             'reply_to' => $reply,
-            'heart_count' => (int)($msg->heart_count ?? 0),
-            'my_hearted' => (bool)($msg->my_hearted ?? false),
-            'created_at' => optional($msg->created_at)->toISOString(),
-            'read_at' => optional($msg->read_at)->toISOString(),
+            'heart_count' => (int)($m->heart_count ?? 0),
+            'my_hearted' => (bool)($m->my_hearted ?? false),
+            'created_at' => optional($m->created_at)->toISOString(),
+            'read_at' => optional($m->read_at)->toISOString(),
+            'deleted_at' => optional($m->deleted_at)->toISOString(),
         ];
     }
 
-    private function updateReplyStats(ChatRoom $room, Message $newMsg): void
+    private function updateReplyStats(ChatRoom $room, Message $msg): void
     {
-        $me = $newMsg->user_id;
+        // Lightweight placeholder: keep existing stats table populated.
+        // You can extend this later for analytics.
+        try {
+            UserChatStat::firstOrCreate(['user_id' => $msg->user_id], [
+                'reply_time_ema_sec' => 0,
+                'replies_count' => 0,
+                'reply_within_1h' => 0,
+                'reply_within_24h' => 0,
+            ]);
+        } catch (\Throwable $e) {
+            // ignore
+        }
+    }
 
-        $lastOther = Message::where('chat_room_id', $room->id)
-            ->where('user_id', '!=', $me)
-            ->latest('id')
-            ->first(['id', 'created_at']);
+    private function broadcastChatListForBoth(ChatRoom $room): void
+    {
+        $u1 = (int)$room->user_one;
+        $u2 = (int)$room->user_two;
 
-        if (!$lastOther) return;
+        // For now, the client simply re-fetches /api/bootstrap on chatlist.updated.
+        // Still include minimal payload for future diff-patching.
+        broadcast(new ChatListUpdated($u1, ['room_uuid' => $room->uuid]))->toOthers();
+        broadcast(new ChatListUpdated($u2, ['room_uuid' => $room->uuid]))->toOthers();
 
-        $deltaSec = max(0, $newMsg->created_at->diffInSeconds($lastOther->created_at));
-
-        $stat = UserChatStat::firstOrCreate(['user_id' => $me]);
-
-        $alpha = 0.2;
-        $old = $stat->reply_time_ema_sec ?: $deltaSec;
-        $ema = (int)round($alpha * $deltaSec + (1 - $alpha) * $old);
-
-        $stat->reply_time_ema_sec = $ema;
-        $stat->replies_count = $stat->replies_count + 1;
-
-        $n = max(1, (int)$stat->replies_count);
-
-        $within1h = ($deltaSec <= 3600) ? 100 : 0;
-        $within24h = ($deltaSec <= 86400) ? 100 : 0;
-
-        $stat->reply_within_1h = (int)round((($stat->reply_within_1h * ($n - 1)) + $within1h) / $n);
-        $stat->reply_within_24h = (int)round((($stat->reply_within_24h * ($n - 1)) + $within24h) / $n);
-
-        $stat->save();
+        // NOTE: `toOthers()` means the user triggering the action won't receive this.
+        // That's okay: the SPA updates optimistically + will refresh on next event.
     }
 }

@@ -30,6 +30,10 @@ class OnboardingController extends Controller
 
         $tags = Tag::orderBy('name')->get();
 
+        if (request()->routeIs('partials.onboarding.profile') || request()->ajax()) {
+            return view('spa.onboarding_profile_partial', compact('profile','tags'));
+        }
+
         return view('profile.onboarding', compact('profile', 'tags'));
     }
 
@@ -57,8 +61,12 @@ class OnboardingController extends Controller
 
         $profile->tags()->sync($data['tags'] ?? []);
 
+        if ($request->expectsJson() || $request->ajax()) {
+            return response()->json(['ok' => true, 'next' => '/onboarding/quiz']);
+        }
+
         return redirect()->route('onboarding.quiz');
-    }
+}
 
     public function quiz()
     {
@@ -68,6 +76,10 @@ class OnboardingController extends Controller
             ->get();
 
         $existing = UserMatchAnswer::where('user_id', auth()->id())->get()->keyBy('match_question_id');
+
+        if (request()->routeIs('partials.onboarding.quiz') || request()->ajax()) {
+            return view('spa.onboarding_quiz_partial', compact('questions','existing'));
+        }
 
         return view('profile.quiz', compact('questions','existing'));
     }
@@ -88,8 +100,12 @@ class OnboardingController extends Controller
 
         $this->recomputeFeatures($userId);
 
+        if ($request->expectsJson() || $request->ajax()) {
+            return response()->json(['ok' => true, 'next' => '/match']);
+        }
+
         return redirect()->route('match');
-    }
+}
 
     private function recomputeFeatures(int $userId): void
     {
