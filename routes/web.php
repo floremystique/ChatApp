@@ -1,6 +1,8 @@
 <?php
 
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Broadcast;
+
 
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\OnboardingController;
@@ -75,6 +77,12 @@ Route::get('/__dbg', function () {
         'reverb_conn' => config('broadcasting.connections.reverb'),
     ]);
 });
+
+
+Route::get('/debug/broadcast', function () {
+    broadcast(new \App\Events\DebugPing("Ping " . now()))->toOthers();
+    return "Broadcasted DebugPing at " . now();
+})->middleware('auth');
 
 
 require __DIR__.'/auth.php';
