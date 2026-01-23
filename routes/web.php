@@ -85,14 +85,17 @@ Route::get('/broadcast-test', function () {
     return view('broadcast-test');
 })->middleware('auth');
 
+Route::post('/broadcast-test/fire', function (Request $request) {
+    event(new TestBroadcastNow());
+    return response()->json(['ok' => true]);
+})->middleware('auth');
 
-Route::get('/__broadcast-debug', function () {
-    return response()->json([
-        'env' => app()->environment(),
-        'broadcast_default' => config('broadcasting.default'),
-        'reverb' => config('broadcasting.connections.reverb'),
-        'pusher' => config('broadcasting.connections.pusher'),
-    ]);
+Route::post('/broadcast-test/fire', function () {
+    Log::info('Firing TestBroadcastNow...');
+    event(new \App\Events\TestBroadcastNow());
+    Log::info('Fired TestBroadcastNow ✅');
+    return response()->json(['ok' => true]);
 });
+
 
 require __DIR__.'/auth.php';
