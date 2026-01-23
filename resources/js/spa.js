@@ -223,19 +223,48 @@ function renderChatsList() {
     }
 
     view.innerHTML = `
-        <div class="p-3">
-            <div class="relative mb-3">
-                <input id="spa-search" class="w-full rounded-full border-gray-200 bg-gray-50 pl-10 pr-4 py-2 text-sm focus:ring-purple-500 focus:border-purple-500" placeholder="Search"/>
-                <div class="absolute left-3 top-2.5 text-gray-400">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M12.9 14.32a8 8 0 111.414-1.414l3.387 3.387a1 1 0 01-1.414 1.414l-3.387-3.387zM14 8a6 6 0 11-12 0 6 6 0 0112 0z" clip-rule="evenodd"/>
-                    </svg>
-                </div>
-            </div>
+      <div style="padding:12px;">
+        <div style="position:relative; margin-bottom:12px;">
+          <input
+            id="spa-search"
+            type="text"
+            placeholder="Search"
+            style="
+              width:100%;
+              height:40px;
+              border-radius:9999px;
+              border:1px solid #e5e7eb;
+              background:#f9fafb;
+              padding-left:16px;
+              padding-right:48px;
+              font-size:14px;
+              outline:none;
+            "
+          />
 
-            <div id="spa-room-list" class="space-y-1"></div>
+          <div style="
+            position:absolute;
+            right:16px;
+            top:50%;
+            transform:translateY(-50%);
+            color:#9ca3af;
+            pointer-events:none;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+          ">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd"
+                d="M12.9 14.32a8 8 0 111.414-1.414l3.387 3.387a1 1 0 01-1.414 1.414l-3.387-3.387zM14 8a6 6 0 11-12 0 6 6 0 0112 0z"
+                clip-rule="evenodd"/>
+            </svg>
+          </div>
         </div>
+
+        <div id="spa-room-list"></div>
+      </div>
     `;
+
 
     const list = document.getElementById('spa-room-list');
     const renderList = (q = '') => {
@@ -391,7 +420,7 @@ function renderChatRoom() {
 
             <div class="p-3 border-t bg-white">
                 <form id="spa-send-form" class="flex items-center gap-2">
-                    <input id="spa-input" class="flex-1 rounded-full border-gray-200 bg-gray-50 px-4 py-2 text-sm focus:ring-purple-500 focus:border-purple-500"
+                    <input id="spa-input" class="flex-1 rounded-full border-gray-200 bg-gray-50 px-4 py-2 text-[16px] focus:ring-purple-500 focus:border-purple-500"
                            placeholder="${closed ? 'Chat closed' : 'Type a message…'}" ${closed ? 'disabled' : ''} autocomplete="off" />
                     <button class="h-10 px-4 rounded-full bg-purple-600 text-white text-sm font-semibold disabled:opacity-50" ${closed ? 'disabled' : ''}>Send</button>
                 </form>
@@ -410,6 +439,25 @@ function renderChatRoom() {
         const input = document.getElementById('spa-input');
         let typingTimer = null;
 
+        const sendBtn = document.querySelector('#spa-send-form button[type="submit"]');
+
+        // Prevent the button tap from stealing focus (mobile fix)
+        if (sendBtn) {
+          sendBtn.addEventListener('pointerdown', (e) => {
+            e.preventDefault();               // key line
+            input.focus({ preventScroll: true });
+          });
+        }
+
+        // Make tapping the whole composer focus the input (easier on mobile)
+        const composer = document.querySelector('#spa-send-form');
+        if (composer) {
+          composer.addEventListener('click', () => {
+            input.focus({ preventScroll: true });
+          });
+        }
+
+
         input.addEventListener('input', () => {
             apiPost(`/chat/${state.activeRoom.uuid}/typing`, { typing: true }).catch(()=>{});
             clearTimeout(typingTimer);
@@ -419,19 +467,32 @@ function renderChatRoom() {
         });
 
         document.getElementById('spa-send-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const body = input.value.trim();
-            if (!body) return;
+          e.preventDefault();
+          const body = input.value.trim();
+          if (!body) return;
 
-            input.value = '';
+          // keep focus BEFORE and AFTER send (mobile-friendly)
+          input.focus({ preventScroll: true });
+
+          // clear text but keep focus
+          input.value = '';
+
+          try {
             const res = await apiPost(`/chat/${state.activeRoom.uuid}/send`, { body });
 
-            // Instant feedback (sender does not receive `toOthers()` broadcasts)
+            // Instant feedback
             if (res?.message) {
-                pushUniqueMessage(res.message);
-                renderChatMessages(true);
+              pushUniqueMessage(res.message);
+              renderChatMessages(true);
             }
+          } finally {
+            // iOS sometimes still blurs after async - force focus back
+            requestAnimationFrame(() => {
+              input.focus({ preventScroll: true });
+            });
+          }
         });
+
     }
 }
 
@@ -799,6 +860,33 @@ function wireAjaxForms(root) {
         });
 
         const next = res.data?.next || null;
+
+        /* =================================================
+           QUIZ COMPLETED → GO BACK TO MATCHES (FINAL STEP)
+        ================================================= */
+        if (next === '/match') {
+
+            // switch SPA state
+            state.activeTab = 'matches';
+            state.matchesSub = 'list';
+            state.activeRoom = null;
+
+            // activate Matches tab visually
+            document.querySelectorAll('.spa-tab').forEach(btn => {
+                btn.classList.toggle('is-active', btn.dataset.tab === 'matches');
+            });
+
+            // reset caches so fresh matches load
+            cachedMatchesHtml = null;
+            cachedOnboardingProfileHtml = null;
+            cachedOnboardingQuizHtml = null;
+
+            // fetch + render latest matches
+            await refreshMatchesNow();
+            renderMatches();
+
+            return;
+        }
 
         // =========================
         // ONBOARDING PROFILE SAVED
