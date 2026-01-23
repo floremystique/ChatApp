@@ -428,6 +428,18 @@ function renderChatRoom() {
         </div>
     `;
 
+    const input = document.getElementById('spa-input');
+    if (input) {
+      input.style.position = 'relative';
+      input.style.zIndex = '2';
+    }
+    
+    const sendBtn = document.querySelector('#spa-send-form button');
+    if (sendBtn) {
+      sendBtn.style.position = 'relative';
+      sendBtn.style.zIndex = '1';
+    }
+
     el('spa-back').onclick = () => {
         state.activeRoom = null;
         render();
