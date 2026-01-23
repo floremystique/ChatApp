@@ -11,6 +11,8 @@ use App\Http\Controllers\ChatController;
 use App\Http\Controllers\ChatListController;
 use App\Http\Controllers\SpaController;
 
+use App\Events\TestBroadcastNow;
+
 Route::get('/', function () {
     return redirect()->route('spa');
 })->middleware(['auth', 'verified'])->name('dashboard');
@@ -78,11 +80,13 @@ Route::get('/__dbg', function () {
     ]);
 });
 
-
-Route::get('/debug/broadcast', function () {
-    broadcast(new \App\Events\DebugPing("Ping " . now()))->toOthers();
-    return "Broadcasted DebugPing at " . now();
+Route::get('/broadcast-test', function () {
+    return view('broadcast-test');
 })->middleware('auth');
 
+Route::post('/broadcast-test/fire', function (Request $request) {
+    event(new TestBroadcastNow());
+    return response()->json(['ok' => true]);
+})->middleware('auth');
 
 require __DIR__.'/auth.php';
