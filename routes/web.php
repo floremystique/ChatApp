@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Broadcast;
+use Illuminate\Support\Facades\Log;
 
 
 use App\Http\Controllers\ProfileController;
@@ -84,9 +85,14 @@ Route::get('/broadcast-test', function () {
     return view('broadcast-test');
 })->middleware('auth');
 
-Route::post('/broadcast-test/fire', function (Request $request) {
-    event(new TestBroadcastNow());
-    return response()->json(['ok' => true]);
-})->middleware('auth');
+
+Route::get('/__broadcast-debug', function () {
+    return response()->json([
+        'env' => app()->environment(),
+        'broadcast_default' => config('broadcasting.default'),
+        'reverb' => config('broadcasting.connections.reverb'),
+        'pusher' => config('broadcasting.connections.pusher'),
+    ]);
+});
 
 require __DIR__.'/auth.php';
