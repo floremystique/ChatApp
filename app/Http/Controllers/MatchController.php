@@ -243,6 +243,15 @@ class MatchController extends Controller
             return $thresholds[3];
         };
 
+        $bondWordTight = function (int $x, array $thresholds): string {
+            // for similarity metrics (usually high numbers), so tighter bands
+            if ($x >= 95) return $thresholds[0];
+            if ($x >= 85) return $thresholds[1];
+            if ($x >= 70) return $thresholds[2];
+            return $thresholds[3];
+        };
+
+
         // ----------------------------
         // 8) Compute final score in PHP + attach band + bond chips
         // ----------------------------
@@ -397,12 +406,19 @@ class MatchController extends Controller
             $p->band = $scoreBand($final);
 
             // Bond chips (1 word, connection-focused)
+            $theirStability = (int)$theirF->stability;                 // 0..100
+            $theirTrust     = (int)$theirF->trust;                     // 0..100
+            $theirConflictSafety = max(0, 100 - (int)$theirF->conflict); // 0..100
+            $theirReplies   = (int)($theirF->responsiveness ?? 50);    // 0..100 (fallback)
+
+            // Now chips describe THEM (will vary a lot more)
             $p->bond_chips = [
-                'Stability' => $bondWord((int)round($simStability), ['Anchored', 'Steady', 'Testing Relationship', 'Fragile']),
-                'Trust'     => $bondWord((int)round($simTrust),     ['Reserved',   'Open',   'Cautious', 'Guarded']),
-                'Replies'   => $bondWord((int)$theirF->responsiveness, ['Flowing Replies', 'Steady Replies', 'Slow Replies', 'Stalled Replies']),
-                'Conflict'  => $bondWord((int)round(($theirConflictSafety + $simConflictSafety) / 2), ['Calm', 'Adjustable', 'Tensions', 'Easygoing']),
+                'Replies'   => $bondWord($theirReplies,   ['Fast Replies', 'Steady Replies', 'New here', 'Rare Replies']),
+                'Stability' => $bondWord($theirStability, ['Anchored', 'Steady', 'Unsettled', 'Fragile']),
+                'Trust'     => $bondWord($theirTrust,     ['Open', 'Warm', 'Cautious', 'Guarded']),
+                'Conflict'  => $bondWord($theirConflictSafety, ['Calm', 'Flexible', 'Tensed', 'Volatile']),
             ];
+
 
             // keep details for debugging
             $p->score_breakdown = [

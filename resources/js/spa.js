@@ -132,10 +132,10 @@ async function preloadProfileHtml() {
 
 
 async function preloadOnboardingProfileHtml() {
-    try {
-        const res = await window.axios.get('/partials/onboarding-profile', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-        cachedOnboardingProfileHtml = res.data;
-    } catch {}
+  const res = await window.axios.get('/partials/onboarding-profile', {
+    headers: { 'X-Requested-With': 'XMLHttpRequest' }
+  });
+  cachedOnboardingProfileHtml = res.data;
 }
 async function preloadOnboardingQuizHtml() {
     try {
@@ -194,12 +194,31 @@ function renderChatsList() {
     const view = el('spa-view');
     if (!state.rooms.length) {
         view.innerHTML = `
-            <div class="p-6 text-center">
-                <div class="text-gray-800 font-semibold">No chats yet</div>
-                <div class="text-gray-500 text-sm mt-1">Start matching to begin chatting.</div>
-                <a href="/match" class="inline-block mt-4 px-4 py-2 rounded-full bg-purple-600 text-white">Find matches</a>
-            </div>
+          <div class="p-6 text-center">
+            <div class="text-gray-800 font-semibold">No chats yet</div>
+            <div class="text-gray-500 text-sm mt-1">Start matching to begin chatting.</div>
+
+            <button id="spa-find-matches"
+              class="inline-block mt-4 px-4 py-2 rounded-full bg-purple-600 text-white font-semibold">
+              Find matches
+            </button>
+          </div>
         `;
+
+        document.getElementById('spa-find-matches')?.addEventListener('click', async () => {
+          // switch to matches tab + refresh latest
+          state.activeRoom = null;
+          state.activeTab = 'matches';
+          document.querySelectorAll('.spa-tab').forEach(b => {
+            b.classList.toggle('is-active', b.dataset.tab === 'matches');
+          });
+
+          // If user is new, show the onboarding screen in matches immediately
+          state.matchesSub = state.status.has_profile ? 'list' : 'list';
+
+          await refreshMatchesNow(); // will render matches list / onboarding screen correctly
+        });
+
         return;
     }
 
@@ -264,6 +283,8 @@ function renderChatsList() {
             await openRoom(roomId, roomUuid);
         });
     });
+
+    setViewScrollMode('scroll');
 }
 
 let roomChannel = null;
@@ -328,6 +349,7 @@ async function loadLatestMessages() {
 }
 
 function renderChatRoom() {
+    setViewScrollMode('no-scroll');
     const room = state.rooms.find(r => String(r.id) === String(state.activeRoom.id));
     const name = room?.other_user?.name || 'Chat';
     setTopbar(name, state.typing ? 'Typing…' : '');
@@ -357,7 +379,7 @@ function renderChatRoom() {
 
     const view = el('spa-view');
     view.innerHTML = `
-        <div class="h-full flex flex-col">
+        <div class="h-full flex flex-col overflow-hidden">
             <div class="px-3 py-2 border-b bg-white flex items-center justify-between">
                 <button id="spa-back" class="text-purple-700 text-sm font-semibold">← Back</button>
                 <div class="text-xs text-gray-500">${closed ? 'Chat closed' : ''}</div>
@@ -478,98 +500,113 @@ async function renderMatches() {
     setTopbar('Matches', 'People you matched with');
     setAvatar(initials(state.user?.name));
 
-    // Right-side action = profile card (opens profile tab)
     setAction(
         `<button data-spa-action class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-gray-100 hover:bg-gray-200" title="Edit profile">
-            <span class="h-7 w-7 rounded-full bg-purple-600 text-white flex items-center justify-center text-xs font-semibold">${htmlEscape(initials(state.user?.name))}</span>
             <span class="text-xs font-semibold text-gray-800">Edit profile</span>
         </button>`,
         () => { state.matchesSub = 'profile'; render(); }
     );
+
     const view = el('spa-view');
 
-    // If user hasn't completed onboarding, show the flow hint (server-rendered pages still exist).
-    if (!state.status.has_profile) {
-        view.innerHTML = `
-            <div class="p-6">
-                <div class="text-lg font-semibold">Complete your profile</div>
-                <div class="text-sm text-gray-500 mt-1">We need your Match Profile before showing matches.</div>
-                <button type="button" data-spa-open-match-profile class="inline-block mt-4 px-4 py-2 rounded-full bg-purple-600 text-white">Start</button>
-            </div>
-        `;
-        wireMatchActions(view);
-        return;
-    }
-    if (!state.status.has_quiz) {
-        view.innerHTML = `
-            <div class="p-6">
-                <div class="text-lg font-semibold">Serious Compatibility</div>
-                <div class="text-sm text-gray-500 mt-1">Answer the short quiz to unlock better matching.</div>
-                <button type="button" data-spa-open-match-quiz class="inline-block mt-4 px-4 py-2 rounded-full bg-purple-600 text-white">Continue</button>
-            </div>
-        `;
-        wireMatchActions(view);
-        return;
-    }
+    /* =========================================================
+       ✅ FIRST: if user clicked Start / Edit profile → show form
+    ========================================================= */
 
-
-    // Match profile / Serious compatibility inside SPA (no refresh)
     if (state.matchesSub === 'profile') {
         setTopbar('Match profile', 'Your preferences for matching');
-        setAvatar(initials(state.user?.name));
         setAction(
             `<button data-spa-action class="text-xs font-semibold px-3 py-1.5 rounded-full bg-gray-100 hover:bg-gray-200">Back</button>`,
             () => { state.matchesSub = 'list'; render(); }
         );
 
-        if (cachedOnboardingProfileHtml) {
-            view.innerHTML = `<div class="p-3">${cachedOnboardingProfileHtml}</div>`;
-            wireAjaxForms(view);
-            wireAjaxLinks(view);
-            // After submit, server will return JSON next step; handled in wireAjaxForms.
-            return;
+        if (!cachedOnboardingProfileHtml) {
+            view.innerHTML = `<div class="p-6 text-sm text-gray-500">Loading profile…</div>`;
+            await preloadOnboardingProfileHtml();
         }
-        view.innerHTML = `<div class="p-6 text-sm text-gray-500">Loading…</div>`;
-        await preloadOnboardingProfileHtml();
-        return renderMatches();
+
+        view.innerHTML = `<div class="p-3">${cachedOnboardingProfileHtml}</div>`;
+        wireAjaxForms(view);
+        wireAjaxLinks(view);
+        return;
     }
 
     if (state.matchesSub === 'quiz') {
         setTopbar('Serious Compatibility', 'Answer a few quick questions');
-        setAvatar(initials(state.user?.name));
         setAction(
             `<button data-spa-action class="text-xs font-semibold px-3 py-1.5 rounded-full bg-gray-100 hover:bg-gray-200">Back</button>`,
             () => { state.matchesSub = 'profile'; render(); }
         );
 
-        if (cachedOnboardingQuizHtml) {
-            view.innerHTML = `<div class="p-3">${cachedOnboardingQuizHtml}</div>`;
-            wireAjaxForms(view);
-            wireAjaxLinks(view);
-            return;
+        if (!cachedOnboardingQuizHtml) {
+            view.innerHTML = `<div class="p-6 text-sm text-gray-500">Loading quiz…</div>`;
+            await preloadOnboardingQuizHtml();
         }
-        view.innerHTML = `<div class="p-6 text-sm text-gray-500">Loading…</div>`;
-        await preloadOnboardingQuizHtml();
-        return renderMatches();
+
+        view.innerHTML = `<div class="p-3">${cachedOnboardingQuizHtml}</div>`;
+        wireAjaxForms(view);
+        wireAjaxLinks(view);
+        return;
     }
-    // Use cached server-rendered HTML for now (keeps your existing scoring logic intact).
-    if (cachedMatchesHtml) {
+
+    /* =========================================================
+       ✅ THEN: show “Complete your profile” screen
+    ========================================================= */
+
+    if (!state.status.has_profile) {
         view.innerHTML = `
-            <div class="p-3">
-                <div class="bg-white border rounded-xl overflow-hidden">
-                    ${cachedMatchesHtml}
+            <div class="p-6">
+                <div class="text-lg font-semibold">Complete your profile</div>
+                <div class="text-sm text-gray-500 mt-1">
+                    We need your Match Profile before showing matches.
                 </div>
+                <button type="button" data-spa-open-match-profile
+                    class="inline-block mt-4 px-5 py-2.5 rounded-full bg-purple-600 text-white font-semibold">
+                    Start
+                </button>
             </div>
         `;
-        wireAjaxLinks(view);
         wireMatchActions(view);
         return;
     }
 
-    view.innerHTML = `<div class="p-6 text-sm text-gray-500">Loading matches…</div>`;
-    await preloadMatchesHtml();
-    return renderMatches();
+    if (!state.status.has_quiz) {
+        view.innerHTML = `
+            <div class="p-6">
+                <div class="text-lg font-semibold">Serious Compatibility</div>
+                <div class="text-sm text-gray-500 mt-1">
+                    Answer the short quiz to unlock better matching.
+                </div>
+                <button type="button" data-spa-open-match-quiz
+                    class="inline-block mt-4 px-5 py-2.5 rounded-full bg-purple-600 text-white font-semibold">
+                    Continue
+                </button>
+            </div>
+        `;
+        wireMatchActions(view);
+        return;
+    }
+
+    /* =========================================================
+       ✅ Finally: render matches list (cachedMatchesHtml)
+    ========================================================= */
+
+    if (!cachedMatchesHtml) {
+        view.innerHTML = `<div class="p-6 text-sm text-gray-500">Loading matches…</div>`;
+        await preloadMatchesHtml();
+    }
+
+    view.innerHTML = `
+        <div class="p-3">
+            <div class="bg-white border rounded-xl overflow-hidden">
+                ${cachedMatchesHtml}
+            </div>
+        </div>
+    `;
+    wireAjaxLinks(view);
+    wireMatchActions(view);
 }
+
 
 async function renderProfile() {
     setTopbar('Profile', 'Account & settings');
@@ -629,6 +666,41 @@ function wireAjaxLinks(root) {
 }
 
 function wireMatchActions(root) {
+
+   root.querySelectorAll('[data-spa-open-match-profile]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+
+      console.log('[SPA] Start onboarding profile clicked ✅');
+
+      state.activeTab = 'matches';
+      state.matchesSub = 'profile';
+
+      // highlight bottom tab
+      document.querySelectorAll('.spa-tab').forEach(b => {
+        b.classList.toggle('is-active', b.dataset.tab === 'matches');
+      });
+
+      // always refetch latest onboarding partial
+      cachedOnboardingProfileHtml = null;
+
+      // show loading in the current view so user sees something
+      const view = document.getElementById('spa-view');
+      if (view) view.innerHTML = `<div class="p-6 text-sm text-gray-500">Loading profile…</div>`;
+
+      try {
+        await preloadOnboardingProfileHtml();
+
+        console.log('[SPA] onboarding profile html loaded?', !!cachedOnboardingProfileHtml);
+
+        render(); // will render matchesSub === 'profile'
+      } catch (err) {
+        console.error('[SPA] preloadOnboardingProfileHtml failed', err);
+        alert('Failed to load onboarding form. Check console/network.');
+      }
+    });
+  });
+
     // Start chat buttons (preferred)
     root.querySelectorAll('[data-spa-start-chat]').forEach(btn => {
         btn.addEventListener('click', async (e) => {
@@ -698,73 +770,220 @@ function wireMatchActions(root) {
 }
 
 
-function wireAjaxForms(root) {
-    root.querySelectorAll('form').forEach(form => {
-        form.addEventListener('submit', async (e) => {
-            // If the form doesn't have action, skip.
-            const action = form.getAttribute('action');
-            if (!action) return;
-
-            e.preventDefault();
-
-            const methodInput = form.querySelector('input[name="_method"]');
-            const method = (methodInput?.value || form.getAttribute('method') || 'POST').toUpperCase();
-
-            const fd = new FormData(form);
-            // Laravel expects _method for PATCH/PUT/DELETE in POST; we'll keep that.
-            try {
-                const res = await window.axios({
-                    url: action,
-                    method: method === 'GET' ? 'GET' : 'POST',
-                    data: fd,
-                    headers: { 'Accept': 'application/json' },
-                });
-
-                // Handle SPA forms
-                const next = res.data?.next || null;
-                const ok = res.data?.ok ?? true;
-
-                // Onboarding flow (match profile / serious compatibility)
-                if (action.startsWith('/onboarding')) {
-                    // update status
-                    if (action === '/onboarding') state.status.has_profile = true;
-                    if (action.startsWith('/onboarding/quiz')) state.status.has_quiz = true;
-
-                    if (next && next.includes('/onboarding/quiz')) {
-                        state.matchesSub = 'quiz';
-                        cachedOnboardingQuizHtml = null;
-                        await preloadOnboardingQuizHtml();
-                        return render();
-                    }
-                    // Finished quiz -> go back to matches list
-                    state.matchesSub = 'list';
-                    cachedMatchesHtml = null;
-                    await preloadMatchesHtml();
-                    return render();
-                }
-
-                // Profile/account settings (Breeze)
-                cachedProfileHtml = null;
-                await preloadProfileHtml();
-                renderProfile();
-            } catch (err) {
-                // fall back: show server validation errors (if any)
-                alert('Could not save. Please check your inputs.');
-            }
-        });
-    });
+async function refreshStatusFromBootstrap() {
+  try {
+    const data = await apiGet('/api/bootstrap');
+    if (data?.status) state.status = data.status;
+    if (data?.rooms) state.rooms = data.rooms;
+  } catch {}
 }
+
+function wireAjaxForms(root) {
+  root.querySelectorAll('form').forEach(form => {
+    form.addEventListener('submit', async (e) => {
+      const action = form.getAttribute('action');
+      if (!action) return;
+
+      e.preventDefault();
+
+      const methodInput = form.querySelector('input[name="_method"]');
+      const method = (methodInput?.value || form.getAttribute('method') || 'POST').toUpperCase();
+      const fd = new FormData(form);
+
+      try {
+        const res = await window.axios({
+          url: action,
+          method: method === 'GET' ? 'GET' : 'POST',
+          data: fd,
+          headers: { 'Accept': 'application/json' },
+        });
+
+        const next = res.data?.next || null;
+
+        // =========================
+        // ONBOARDING PROFILE SAVED
+        // =========================
+        if (action === '/onboarding') {
+          // IMPORTANT: unlock the app state
+          state.status.has_profile = true;
+
+          // Go to quiz inside Matches tab (no refresh)
+          state.activeTab = 'matches';
+          state.matchesSub = 'quiz';
+          document.querySelectorAll('.spa-tab').forEach(b => {
+            b.classList.toggle('is-active', b.dataset.tab === 'matches');
+          });
+
+          // Always load fresh quiz HTML
+          cachedOnboardingQuizHtml = null;
+          await preloadOnboardingQuizHtml();
+          render();
+          return;
+        }
+
+        // =========================
+        // ONBOARDING QUIZ SAVED
+        // =========================
+        if (action.startsWith('/onboarding/quiz')) {
+          // IMPORTANT: unlock the app state
+          state.status.has_quiz = true;
+
+          // Optional but best: sync real status from server
+          await refreshStatusFromBootstrap();
+
+          // Close forms and show latest matches
+          state.activeTab = 'matches';
+          state.matchesSub = 'list';
+          document.querySelectorAll('.spa-tab').forEach(b => {
+            b.classList.toggle('is-active', b.dataset.tab === 'matches');
+          });
+
+          // Force latest matches HTML
+          cachedMatchesHtml = null;
+          cachedOnboardingProfileHtml = null;
+          cachedOnboardingQuizHtml = null;
+
+          await refreshMatchesNow();
+          return;
+        }
+
+        // =========================
+        // Other (profile/account etc.)
+        // =========================
+        // keep your existing behavior here if needed
+      } catch (err) {
+        alert('Could not save. Please check your inputs.');
+      }
+    });
+  });
+}
+
+
+(function setupBackToExit() {
+  let lastBack = 0;
+
+  // Push an extra history state so the first "back" triggers popstate
+  history.pushState({ spa: true }, "", location.href);
+
+  window.addEventListener("popstate", (e) => {
+    const now = Date.now();
+    const withinWindow = now - lastBack < 1500;
+
+    if (!withinWindow) {
+      lastBack = now;
+
+      // Re-push so we stay in app
+      history.pushState({ spa: true }, "", location.href);
+
+      // Show warning (replace with your toast UI)
+      showExitToast("Press back again to exit");
+    } else {
+      // Allow exit (go back for real)
+      history.back();
+    }
+  });
+
+  function showExitToast(msg) {
+    // Minimal: alert(msg) (not recommended)
+    // Better: render a small toast at bottom
+    console.log(msg);
+
+    let t = document.getElementById("exit-toast");
+    if (!t) {
+      t = document.createElement("div");
+      t.id = "exit-toast";
+      t.style.position = "fixed";
+      t.style.left = "50%";
+      t.style.bottom = "90px";
+      t.style.transform = "translateX(-50%)";
+      t.style.padding = "10px 14px";
+      t.style.borderRadius = "12px";
+      t.style.background = "rgba(0,0,0,.85)";
+      t.style.color = "#fff";
+      t.style.fontSize = "13px";
+      t.style.zIndex = "99999";
+      document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.style.opacity = "1";
+    clearTimeout(window.__exitToastTimer);
+    window.__exitToastTimer = setTimeout(() => (t.style.opacity = "0"), 1200);
+  }
+})();
+
 
 // Mount
 document.addEventListener('DOMContentLoaded', () => {
     if (!el('spa-root')) return;
 
     document.querySelectorAll('.spa-tab').forEach(btn => {
-        btn.addEventListener('click', () => setActiveTab(btn.dataset.tab));
+      btn.addEventListener('click', async () => {
+        const tab = btn.dataset.tab;
+
+        // Always refresh matches tab with mini loader
+        if (tab === 'matches') {
+          state.activeRoom = null;
+          state.activeTab = 'matches';
+          document.querySelectorAll('.spa-tab').forEach(b => {
+            b.classList.toggle('is-active', b.dataset.tab === 'matches');
+          });
+
+          await refreshMatchesNow();
+          return;
+        }
+
+        setActiveTab(tab);
+      });
     });
+
 
     boot().catch((e) => {
         console.error(e);
         el('spa-view').innerHTML = `<div class="p-6 text-sm text-red-600">Failed to load app.</div>`;
     });
 });
+
+
+function setViewScrollMode(mode) {
+  const view = el('spa-view');
+  if (!view) return;
+  view.classList.remove('overflow-y-auto', 'overflow-hidden');
+  view.classList.add(mode === 'scroll' ? 'overflow-y-auto' : 'overflow-hidden');
+}
+
+async function refreshMatchesNow() {
+  // show mini loader immediately
+  renderMiniLoading('Refreshing matches…');
+
+  // reset caches so we ALWAYS fetch latest
+  cachedMatchesHtml = null;
+
+  try {
+    // pull latest matches partial HTML
+    const res = await window.axios.get('/partials/matches', {
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    });
+    cachedMatchesHtml = res.data;
+  } catch (e) {
+    cachedMatchesHtml = `<div class="p-6 text-sm text-red-600">Failed to load matches.</div>`;
+  }
+
+  // re-render matches tab (list mode)
+  state.matchesSub = 'list';
+  renderMatches();
+}
+
+
+function renderMiniLoading(message = 'Loading…') {
+  const view = el('spa-view');
+  if (!view) return;
+  view.innerHTML = `
+    <div class="p-6">
+      <div class="flex items-center gap-3 text-sm text-gray-600">
+        <div class="h-4 w-4 rounded-full border-2 border-gray-300 border-t-transparent animate-spin"></div>
+        <div>${htmlEscape(message)}</div>
+      </div>
+    </div>
+  `;
+}
+

@@ -4,7 +4,7 @@
         <div class="text-xs text-gray-500 mt-0.5">Quick questions to improve match quality.</div>
     </div>
 
-    <form method="POST" action="{{ route('onboarding.quiz.store') }}" class="p-4 space-y-4">
+    <form method="POST" action="{{ route('onboarding.quiz.store') }}" class="p-4 space-y-4" data-spa-quiz-form>
         @csrf
 
         @foreach($questions as $q)

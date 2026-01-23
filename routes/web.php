@@ -74,13 +74,6 @@ Route::middleware('auth')->group(function () {
 
 });
 
-Route::get('/__dbg', function () {
-    return response()->json([
-        'reverb_apps' => config('reverb.apps'),
-        'reverb_conn' => config('broadcasting.connections.reverb'),
-    ]);
-});
-
 Route::get('/broadcast-test', function () {
     return view('broadcast-test');
 })->middleware('auth');
@@ -90,12 +83,15 @@ Route::post('/broadcast-test/fire', function (Request $request) {
     return response()->json(['ok' => true]);
 })->middleware('auth');
 
-Route::post('/broadcast-test/fire', function () {
-    Log::info('Firing TestBroadcastNow...');
-    event(new \App\Events\TestBroadcastNow());
-    Log::info('Fired TestBroadcastNow ✅');
-    return response()->json(['ok' => true]);
+Route::get('/__broadcast-debug', function () {
+    return response()->json([
+        'env' => app()->environment(),
+        'reverb_apps' => config('reverb.apps'),
+        'reverb_conn' => config('broadcasting.connections.reverb'),
+        'broadcast_default' => config('broadcasting.default'),
+        'reverb' => config('broadcasting.connections.reverb'),
+        'pusher' => config('broadcasting.connections.pusher'),
+    ]);
 });
-
 
 require __DIR__.'/auth.php';
