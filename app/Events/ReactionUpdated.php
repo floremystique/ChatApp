@@ -3,13 +3,16 @@
 namespace App\Events;
 
 use Illuminate\Broadcasting\PrivateChannel;
-use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
+use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-class ReactionUpdated implements ShouldBroadcastNow
+class ReactionUpdated implements ShouldBroadcast, ShouldQueue
 {
     use Dispatchable, SerializesModels;
+
+    public string $queue = 'broadcasts';
 
     public string $roomUuid;
     public int $messageId;

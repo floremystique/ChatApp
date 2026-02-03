@@ -15,6 +15,7 @@ use App\Models\MessageReaction;
 use App\Models\UserChatStat;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class ChatController extends Controller
 {
@@ -38,6 +39,43 @@ class ChatController extends Controller
     }
 
     /**
+     * Ensure the read-state row exists (cheap, idempotent).
+     */
+    private function ensureReadRow(int $roomId, int $userId): void
+    {
+        DB::table('chat_room_reads')->updateOrInsert(
+            ['chat_room_id' => $roomId, 'user_id' => $userId],
+            ['created_at' => now(), 'updated_at' => now()]
+        );
+    }
+
+    private function getLastReadId(int $roomId, int $userId): ?int
+    {
+        $v = DB::table('chat_room_reads')
+            ->where('chat_room_id', $roomId)
+            ->where('user_id', $userId)
+            ->value('last_read_message_id');
+
+        return $v ? (int)$v : null;
+    }
+
+    private function markReadUpTo(ChatRoom $room, int $me, ?int $messageId): void
+    {
+        $this->ensureReadRow((int)$room->id, $me);
+
+        // messageId can be null when room has no messages.
+        DB::table('chat_room_reads')
+            ->where('chat_room_id', (int)$room->id)
+            ->where('user_id', $me)
+            ->update([
+                'last_read_message_id' => $messageId,
+                'unread_count' => 0,
+                'last_seen_at' => now(),
+                'updated_at' => now(),
+            ]);
+    }
+
+    /**
      * SPA-safe: this endpoint should never return HTML.
      */
     public function show(ChatRoom $room)
@@ -45,27 +83,23 @@ class ChatController extends Controller
         $this->ensureParticipant($room);
 
         $me = (int)auth()->id();
+        $otherId = $this->otherUserId($room, $me);
 
-        // Mark other user's messages as read when opening the chat
-        $lastReadId = Message::where('chat_room_id', $room->id)
+        // Make sure read rows exist
+        $this->ensureReadRow((int)$room->id, $me);
+        $this->ensureReadRow((int)$room->id, $otherId);
+
+        // When opening a chat, consider OTHER user's latest message as read.
+        $otherLatestId = Message::where('chat_room_id', $room->id)
             ->where('user_id', '!=', $me)
-            ->whereNull('read_at')
             ->max('id');
 
-        if ($lastReadId) {
-            Message::where('chat_room_id', $room->id)
-                ->where('user_id', '!=', $me)
-                ->whereNull('read_at')
-                ->update(['read_at' => now()]);
-
-            // Notify the other user that messages were seen
-            broadcast(new SeenUpdated($room->uuid, $me, (int)$lastReadId, now()->toISOString()))->toOthers();
+        if ($otherLatestId) {
+            $this->markReadUpTo($room, $me, (int)$otherLatestId);
+            broadcast(new SeenUpdated($room->uuid, $me, (int)$otherLatestId, now()->toISOString()))->toOthers();
+            $this->broadcastChatListForBoth($room);
         }
 
-        // Update unread counts for both users in real-time
-        $this->broadcastChatListForBoth($room);
-
-        $otherId = $this->otherUserId($room, $me);
         $other = \App\Models\User::select('id', 'name')->find($otherId);
 
         return response()->json([
@@ -74,6 +108,7 @@ class ChatController extends Controller
                 'id' => $room->id,
                 'uuid' => $room->uuid,
                 'other_user' => $other ? ['id' => $other->id, 'name' => $other->name] : null,
+                'other_last_read_id' => $this->getLastReadId((int)$room->id, $otherId),
                 'closed_at' => optional($room->closed_at)->toISOString(),
                 'closed_by' => $room->closed_by,
             ],
@@ -88,9 +123,12 @@ class ChatController extends Controller
         $data = $request->validate([
             'body' => ['required', 'string', 'max:10000'],
             'reply_to_id' => ['nullable', 'integer'],
+            // For instant UI reconciliation (optimistic send)
+            'client_message_id' => ['nullable', 'string', 'max:64'],
         ]);
 
         $me = (int)auth()->id();
+        $otherId = $this->otherUserId($room, $me);
 
         $replyToId = $data['reply_to_id'] ?? null;
         if ($replyToId) {
@@ -100,11 +138,47 @@ class ChatController extends Controller
             }
         }
 
-        $msg = $room->messages()->create([
-            'user_id' => $me,
-            'body' => $data['body'],
-            'reply_to_id' => $replyToId,
-        ]);
+        $clientMessageId = $data['client_message_id'] ?? Str::uuid()->toString();
+
+        $msg = DB::transaction(function () use ($room, $me, $otherId, $data, $replyToId, $clientMessageId) {
+            // Ensure read rows exist
+            $this->ensureReadRow((int)$room->id, $me);
+            $this->ensureReadRow((int)$room->id, $otherId);
+
+            $m = $room->messages()->create([
+                'user_id' => $me,
+                'client_message_id' => $clientMessageId,
+                'body' => $data['body'],
+                'reply_to_id' => $replyToId,
+            ]);
+
+            // Update room pointer for fast chat list
+            $room->last_message_id = $m->id;
+            $room->updated_at = now();
+            $room->save();
+
+            // Sender has read their own message
+            DB::table('chat_room_reads')
+                ->where('chat_room_id', (int)$room->id)
+                ->where('user_id', $me)
+                ->update([
+                    'last_read_message_id' => $m->id,
+                    'unread_count' => 0,
+                    'last_seen_at' => now(),
+                    'updated_at' => now(),
+                ]);
+
+            // Recipient unread count increments atomically (O(1))
+            DB::table('chat_room_reads')
+                ->where('chat_room_id', (int)$room->id)
+                ->where('user_id', $otherId)
+                ->update([
+                    'unread_count' => DB::raw('unread_count + 1'),
+                    'updated_at' => now(),
+                ]);
+
+            return $m;
+        });
 
         $msg = $msg->fresh(['replyTo:id,user_id,body,deleted_at,created_at']);
         $serialized = $this->serializeMessage($msg, $me);
@@ -128,22 +202,13 @@ class ChatController extends Controller
         $this->ensureParticipant($room);
 
         $me = (int)auth()->id();
+        $otherId = $this->otherUserId($room, $me);
 
-        // Mark OTHER user's unread messages as read whenever this endpoint is hit
-        $lastReadId = Message::where('chat_room_id', $room->id)
-            ->where('user_id', '!=', $me)
-            ->whereNull('read_at')
-            ->max('id');
+        $this->ensureReadRow((int)$room->id, $me);
+        $this->ensureReadRow((int)$room->id, $otherId);
 
-        if ($lastReadId) {
-            Message::where('chat_room_id', $room->id)
-                ->where('user_id', '!=', $me)
-                ->whereNull('read_at')
-                ->update(['read_at' => now()]);
-
-            broadcast(new SeenUpdated($room->uuid, $me, (int)$lastReadId, now()->toISOString()))->toOthers();
-            $this->broadcastChatListForBoth($room);
-        }
+        // IMPORTANT (perf): Do NOT mark seen automatically on every fetch.
+        // The client calls /seen in a debounced way only when the room is actually visible.
 
         $limit = (int)($request->get('limit', 30));
         $limit = max(10, min($limit, 60));
@@ -169,6 +234,7 @@ class ChatController extends Controller
                 'items' => $items->map(fn($m) => $this->serializeMessage($m, $me))->values(),
                 'next_before_id' => null,
                 'has_more' => false,
+                'other_last_read_id' => $this->getLastReadId((int)$room->id, $otherId),
                 'chat_closed_at' => optional($room->closed_at)->toISOString(),
                 'chat_closed_by' => $room->closed_by,
             ]);
@@ -199,6 +265,7 @@ class ChatController extends Controller
             'items' => $itemsAsc->map(fn($m) => $this->serializeMessage($m, $me))->values(),
             'next_before_id' => $itemsDesc->count() ? $itemsDesc->last()->id : null,
             'has_more' => $itemsDesc->count() === $limit,
+            'other_last_read_id' => $this->getLastReadId((int)$room->id, $otherId),
             'chat_closed_at' => optional($room->closed_at)->toISOString(),
             'chat_closed_by' => $room->closed_by,
         ]);
@@ -248,18 +315,14 @@ class ChatController extends Controller
         $this->ensureParticipant($room);
 
         $me = (int)auth()->id();
-        $lastReadId = Message::where('chat_room_id', $room->id)
+
+        $otherLatestId = Message::where('chat_room_id', $room->id)
             ->where('user_id', '!=', $me)
-            ->whereNull('read_at')
             ->max('id');
 
-        if ($lastReadId) {
-            Message::where('chat_room_id', $room->id)
-                ->where('user_id', '!=', $me)
-                ->whereNull('read_at')
-                ->update(['read_at' => now()]);
-
-            broadcast(new SeenUpdated($room->uuid, $me, (int)$lastReadId, now()->toISOString()))->toOthers();
+        if ($otherLatestId) {
+            $this->markReadUpTo($room, $me, (int)$otherLatestId);
+            broadcast(new SeenUpdated($room->uuid, $me, (int)$otherLatestId, now()->toISOString()))->toOthers();
             $this->broadcastChatListForBoth($room);
         }
 
@@ -270,17 +333,12 @@ class ChatController extends Controller
     {
         $this->ensureParticipant($room);
 
-        // For the current viewer: their latest read message is not very meaningful.
-        // We'll return last read_at for the room.
-        $last = Message::where('chat_room_id', $room->id)
-            ->whereNotNull('read_at')
-            ->orderByDesc('id')
-            ->first();
+        $me = (int)auth()->id();
+        $otherId = $this->otherUserId($room, $me);
 
         return response()->json([
             'ok' => true,
-            'message_id' => $last?->id,
-            'read_at' => optional($last?->read_at)->toISOString(),
+            'other_last_read_id' => $this->getLastReadId((int)$room->id, $otherId),
         ]);
     }
 
@@ -365,7 +423,6 @@ class ChatController extends Controller
 
     private function serializeMessage(Message $m, int $me): array
     {
-        // If message is deleted, we keep body null so UI can show a placeholder.
         $reply = null;
         if ($m->relationLoaded('replyTo') && $m->replyTo) {
             $reply = [
@@ -381,12 +438,15 @@ class ChatController extends Controller
             'id' => $m->id,
             'chat_room_id' => $m->chat_room_id,
             'user_id' => $m->user_id,
+            'client_message_id' => $m->client_message_id,
             'body' => $m->body,
             'reply_to_id' => $m->reply_to_id,
             'reply_to' => $reply,
             'heart_count' => (int)($m->heart_count ?? 0),
             'my_hearted' => (bool)($m->my_hearted ?? false),
             'created_at' => optional($m->created_at)->toISOString(),
+            // We no longer rely on DB per-message read_at writes at scale.
+            // Client marks messages as "seen" using SeenUpdated + other_last_read_id.
             'read_at' => optional($m->read_at)->toISOString(),
             'deleted_at' => optional($m->deleted_at)->toISOString(),
         ];
@@ -394,8 +454,6 @@ class ChatController extends Controller
 
     private function updateReplyStats(ChatRoom $room, Message $msg): void
     {
-        // Lightweight placeholder: keep existing stats table populated.
-        // You can extend this later for analytics.
         try {
             UserChatStat::firstOrCreate(['user_id' => $msg->user_id], [
                 'reply_time_ema_sec' => 0,
@@ -413,12 +471,7 @@ class ChatController extends Controller
         $u1 = (int)$room->user_one;
         $u2 = (int)$room->user_two;
 
-        // For now, the client simply re-fetches /api/bootstrap on chatlist.updated.
-        // Still include minimal payload for future diff-patching.
         broadcast(new ChatListUpdated($u1, ['room_uuid' => $room->uuid]))->toOthers();
         broadcast(new ChatListUpdated($u2, ['room_uuid' => $room->uuid]))->toOthers();
-
-        // NOTE: `toOthers()` means the user triggering the action won't receive this.
-        // That's okay: the SPA updates optimistically + will refresh on next event.
     }
 }

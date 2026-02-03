@@ -8,9 +8,12 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Message extends Model
 {
+    protected $touches = ['room'];
+
     protected $fillable = [
         'chat_room_id',
         'user_id',
+        'client_message_id',
         'body',
         'reply_to_id',
     ];

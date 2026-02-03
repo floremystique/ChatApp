@@ -485,6 +485,13 @@ class MatchController extends Controller
             $room->save();
         }
 
+        
+        // Ensure read-state rows exist (unread counts become O(1))
+        try {
+            \Illuminate\Support\Facades\DB::table('chat_room_reads')->updateOrInsert(['chat_room_id'=>$room->id,'user_id'=>$me],['created_at'=>now(),'updated_at'=>now()]);
+            \Illuminate\Support\Facades\DB::table('chat_room_reads')->updateOrInsert(['chat_room_id'=>$room->id,'user_id'=>$other],['created_at'=>now(),'updated_at'=>now()]);
+        } catch (\Throwable $e) {}
+
         if ($request->expectsJson()) {
             return response()->json([
                 'ok' => true,

@@ -15,18 +15,66 @@ const state = {
     loading: false,
 };
 
-function pushUniqueMessage(msg) {
-  if (!msg) return;
-  const id = Number(msg.id);
-  if (id && state.messages.some(m => Number(m.id) === id)) return;
-  // If the server broadcasts back to the sender, ignore our own message to prevent duplicates.
-  if (msg.user_id != null && state.user?.id != null && String(msg.user_id) === String(state.user.id)) {
-    // If this message is already in the list we returned above; if not, allow push (e.g., first load)
-    if (id && state.messages.some(m => Number(m.id) === id)) return;
-  }
-  state.messages.push(msg);
+// Keep memory stable on mobile: never hold the entire history in DOM/JS.
+const MAX_MSGS_IN_MEMORY = 300;
+
+let _renderMessagesScheduled = false;
+let _renderScrollToBottom = false;
+
+let _seenDebounceTimer = null;
+
+function trimMessageWindow() {
+  const extra = state.messages.length - MAX_MSGS_IN_MEMORY;
+  if (extra > 0) state.messages.splice(0, extra);
 }
 
+function scheduleRenderChatMessages(scrollToBottom) {
+  _renderScrollToBottom = _renderScrollToBottom || !!scrollToBottom;
+  if (_renderMessagesScheduled) return;
+  _renderMessagesScheduled = true;
+  requestAnimationFrame(() => {
+    _renderMessagesScheduled = false;
+    renderChatMessages(_renderScrollToBottom);
+    _renderScrollToBottom = false;
+  });
+}
+
+function scheduleSeen() {
+  if (!state.activeRoom?.uuid) return;
+  if (document.visibilityState !== 'visible') return;
+  clearTimeout(_seenDebounceTimer);
+  _seenDebounceTimer = setTimeout(async () => {
+    try { await apiPost(`/chat/${state.activeRoom.uuid}/seen`, {}); } catch {}
+  }, 800);
+}
+
+function isNearBottom(elm, thresholdPx = 80) {
+  if (!elm) return true;
+  return (elm.scrollHeight - elm.scrollTop - elm.clientHeight) < thresholdPx;
+}
+
+function pushUniqueMessage(msg) {
+  if (!msg) return;
+
+  const cid = (msg.client_message_id ?? msg.clientMessageId ?? null);
+  const idNum = Number(msg.id);
+
+  // Prefer reconciliation by client_message_id (optimistic UI)
+  if (cid) {
+    const idx = state.messages.findIndex(m => (m.client_message_id ?? m.clientMessageId) === cid);
+    if (idx >= 0) {
+      state.messages[idx] = { ...state.messages[idx], ...msg, pending: false, failed: false };
+      trimMessageWindow();
+      return;
+    }
+  }
+
+  // De-dupe by numeric id
+  if (idNum && state.messages.some(m => Number(m.id) === idNum)) return;
+
+  state.messages.push(msg);
+  trimMessageWindow();
+}
 
 function initials(name) {
     const parts = (name || '').trim().split(/\s+/).filter(Boolean);
@@ -147,7 +195,7 @@ async function preloadOnboardingQuizHtml() {
 
 async function refreshRooms() {
     try {
-        const data = await apiGet('/api/bootstrap');
+        const data = await apiGet('/api/rooms');
         state.rooms = data.rooms || [];
         if (state.activeTab === 'chats' && !state.activeRoom) renderChatsList();
     } catch {}
@@ -332,7 +380,10 @@ async function openRoom(roomId, roomUuid) {
     roomChannel = window.Echo.private(`chat.room.${roomUuid}`)
         .listen('.message.sent', (e) => {
             pushUniqueMessage(e.message);
-            renderChatMessages(false);
+            const box = document.getElementById('spa-messages');
+            const autoScroll = isNearBottom(box);
+            scheduleRenderChatMessages(autoScroll);
+            if (String(e.message?.user_id) !== String(state.user?.id)) scheduleSeen();
         })
         .listen('.typing.updated', (e) => {
             // Ignore my own typing echo
@@ -349,7 +400,7 @@ async function openRoom(roomId, roomUuid) {
                     m.read_at = e.readAt || (m.read_at ?? new Date().toISOString());
                 }
             });
-            renderChatMessages(false);
+            scheduleRenderChatMessages(false);
         })
         .listen('.reaction.updated', (e) => {
             const msg = state.messages.find(m => m.id === e.messageId);
@@ -357,11 +408,11 @@ async function openRoom(roomId, roomUuid) {
                 msg.heart_count = e.heartCount;
                 if (String(e.userId) === String(state.user?.id)) msg.my_hearted = !!e.hearted;
             }
-            renderChatMessages(false);
+            scheduleRenderChatMessages(false);
         })
         .listen('.message.deleted', (e) => {
             state.messages = state.messages.filter(m => m.id !== e.messageId);
-            renderChatMessages(false);
+            scheduleRenderChatMessages(false);
         })
         .listen('.chat.closed', (e) => {
             renderChatRoom(); // will disable input
@@ -374,7 +425,20 @@ async function openRoom(roomId, roomUuid) {
 async function loadLatestMessages() {
     const data = await apiGet(`/chat/${state.activeRoom.uuid}/messages`, { limit: 30 });
     state.messages = (data.items || []);
-    renderChatMessages(true);
+
+    // Mark my messages as "seen" based on the other user's last_read id (no per-row DB writes)
+    const otherLastReadId = Number(data.other_last_read_id || 0);
+    if (otherLastReadId) {
+        const me = state.user?.id;
+        state.messages.forEach(m => {
+            if (String(m.user_id) === String(me) && Number(m.id) <= otherLastReadId) {
+                m.read_at = m.read_at || new Date().toISOString();
+            }
+        });
+    }
+
+    scheduleRenderChatMessages(true);
+    scheduleSeen();
 }
 
 function renderChatRoom() {
@@ -445,7 +509,7 @@ function renderChatRoom() {
         render();
     };
 
-    renderChatMessages(true);
+    scheduleRenderChatMessages(true);
 
     if (!closed) {
         const input = document.getElementById('spa-input');
@@ -483,22 +547,46 @@ function renderChatRoom() {
           const body = input.value.trim();
           if (!body) return;
 
-          // keep focus BEFORE and AFTER send (mobile-friendly)
+          // Keep focus BEFORE and AFTER send (mobile-friendly)
           input.focus({ preventScroll: true });
 
-          // clear text but keep focus
+          // Optimistic UI: show message instantly
+          const clientId = (window.crypto?.randomUUID ? window.crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2)));
+          const tempMsg = {
+            id: `tmp-${clientId}`,
+            client_message_id: clientId,
+            chat_room_id: state.activeRoom.id,
+            user_id: state.user?.id,
+            body,
+            created_at: new Date().toISOString(),
+            pending: true,
+            failed: false,
+            heart_count: 0,
+            my_hearted: false,
+          };
+
+          pushUniqueMessage(tempMsg);
+          scheduleRenderChatMessages(true);
+
+          // Clear input (but keep focus)
           input.value = '';
 
           try {
-            const res = await apiPost(`/chat/${state.activeRoom.uuid}/send`, { body });
-
-            // Instant feedback
+            const res = await apiPost(`/chat/${state.activeRoom.uuid}/send`, { body, client_message_id: clientId });
             if (res?.message) {
+              // Reconcile optimistic message with server response
               pushUniqueMessage(res.message);
-              renderChatMessages(true);
+              scheduleRenderChatMessages(true);
             }
+          } catch (err) {
+            // Mark failed; user can re-send by tapping the bubble
+            const i = state.messages.findIndex(m => (m.client_message_id ?? m.clientMessageId) === clientId);
+            if (i >= 0) {
+              state.messages[i].pending = false;
+              state.messages[i].failed = true;
+            }
+            scheduleRenderChatMessages(true);
           } finally {
-            // iOS sometimes still blurs after async - force focus back
             requestAnimationFrame(() => {
               input.focus({ preventScroll: true });
             });
@@ -517,7 +605,11 @@ function renderChatMessages(scrollToBottom) {
     box.innerHTML = state.messages.map(m => {
         const mine = String(m.user_id) === String(me);
         const t = m.created_at ? new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
-        const seen = mine && m.read_at;
+        const pending = !!m.pending;
+        const failed = !!m.failed;
+        const seen = mine && !pending && !failed && m.read_at;
+        const status = failed ? ' · Failed' : (pending ? ' · Sending…' : (seen ? ' · Seen' : ''));
+        const resendAttr = (failed && mine && (m.client_message_id || m.clientMessageId)) ? `data-resend="${m.client_message_id || m.clientMessageId}"` : '';
         const hearts = Number(m.heart_count || 0);
         const myHearted = !!m.my_hearted;
         const body = (m.body === null || typeof m.body === 'undefined')
@@ -526,11 +618,11 @@ function renderChatMessages(scrollToBottom) {
 
         return `
             <div class="flex ${mine ? 'justify-end' : 'justify-start'} mb-2">
-                <div class="${mine ? 'bg-purple-600 text-white' : 'bg-white text-gray-900'} max-w-[82%] rounded-2xl px-4 py-2 shadow-sm">
+                <div ${resendAttr} class="${mine ? 'bg-purple-600 text-white' : 'bg-white text-gray-900'} max-w-[82%] rounded-2xl px-4 py-2 shadow-sm">
                     <div class="text-sm whitespace-pre-wrap break-words">${body}</div>
                     <div class="mt-1 flex items-center justify-end gap-2 text-[10px] ${mine ? 'text-purple-100' : 'text-gray-400'}">
-                        <span>${htmlEscape(t)}${seen ? ' · Seen' : ''}</span>
-                        <button class="inline-flex items-center gap-1" data-heart="${m.id}" title="React">
+                        <span>${htmlEscape(t)}${status}</span>
+                        <button class="inline-flex items-center gap-1" data-heart="${m.id}" title="React" ${pending || failed ? 'disabled' : ''}>
                             <span>${myHearted ? '❤' : '♡'}</span>${hearts ? `<span>${hearts}</span>` : ``}
                         </button>
                     </div>
@@ -552,11 +644,38 @@ function renderChatMessages(scrollToBottom) {
                     msg.my_hearted = !!res.hearted;
                     msg.heart_count = res.heart_count ?? msg.heart_count;
                 }
-                renderChatMessages(false);
+                scheduleRenderChatMessages(false);
             } catch {}
         });
     });
 
+    // Retry failed sends (tap the bubble)
+    box.querySelectorAll('[data-resend]').forEach(bubble => {
+        bubble.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const cid = bubble.getAttribute('data-resend');
+            const msg = state.messages.find(m => (m.client_message_id ?? m.clientMessageId) === cid);
+            if (!msg || !msg.failed) return;
+
+            // New client id for the retry
+            const newCid = (window.crypto?.randomUUID ? window.crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2)));
+            msg.client_message_id = newCid;
+            msg.pending = true;
+            msg.failed = false;
+            scheduleRenderChatMessages(true);
+
+            try {
+                const res = await apiPost(`/chat/${state.activeRoom.uuid}/send`, { body: msg.body, client_message_id: newCid });
+                if (res?.message) {
+                    pushUniqueMessage(res.message);
+                }
+            } catch {
+                msg.pending = false;
+                msg.failed = true;
+            }
+            scheduleRenderChatMessages(true);
+        });
+    });
     if (scrollToBottom) {
         box.scrollTop = box.scrollHeight;
     }

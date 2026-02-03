@@ -27,6 +27,7 @@ Route::middleware('auth')->group(function () {
 
     // SPA bootstrap data
     Route::get('/api/bootstrap', [SpaController::class, 'bootstrap'])->name('api.bootstrap');
+    Route::get("/api/rooms", [SpaController::class, "rooms"])->name("api.rooms");
     // SPA partials (HTML snippets, no layout)
     Route::get('/partials/matches', [MatchController::class, 'index'])->name('partials.matches');
     Route::get('/partials/profile', [ProfileController::class, 'edit'])->name('partials.profile');

@@ -3,10 +3,13 @@
 namespace App\Events;
 
 use Illuminate\Broadcasting\Channel;
-use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
+use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
+use Illuminate\Contracts\Queue\ShouldQueue;
 
-class TestBroadcastNow implements ShouldBroadcastNow
+class TestBroadcastNow implements ShouldBroadcast, ShouldQueue
 {
+    public string $queue = 'broadcasts';
+
     public function broadcastOn()
     {
         return new Channel('test-channel');

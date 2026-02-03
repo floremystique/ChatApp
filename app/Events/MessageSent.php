@@ -3,13 +3,19 @@
 namespace App\Events;
 
 use Illuminate\Broadcasting\PrivateChannel;
-use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
+use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-class MessageSent implements ShouldBroadcastNow
+class MessageSent implements ShouldBroadcast, ShouldQueue
 {
     use Dispatchable, SerializesModels;
+
+    /**
+     * Put broadcast jobs on the broadcasts queue so they never block web requests.
+     */
+    public string $broadcastQueue = 'broadcasts';
 
     public string $roomUuid;
     public array $message;

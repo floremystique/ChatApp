@@ -9,7 +9,7 @@ use Illuminate\Support\Str;
 class ChatRoom extends Model
 {
     protected $fillable = [
-        'uuid','user_low','user_high','user_one','user_two',
+        'uuid','user_low','user_high','user_one','user_two','last_message_id',
         'user_one_typing_until','user_two_typing_until',
         'closed_at','closed_by',
     ];
