@@ -22,3 +22,20 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
+# Mobile (Capacitor)
+mobile/node_modules/
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/.idea/
+mobile/android/local.properties
+mobile/android/capacitor/build/
+mobile/android/capacitor/.cxx/
+mobile/android/capacitor/.transforms/
+mobile/ios/
+mobile/www/
+
+# Zip / generated
+*.zip
+web_modules.zip
+

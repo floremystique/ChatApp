@@ -1,5 +1,9 @@
 import './bootstrap';
 import '../css/app.css';
+import '../css/native.css';
+
+// Capacitor (native wrapper) UX tweaks. Safe on web.
+import './native';
 
 import React from 'react';
 import { createRoot } from 'react-dom/client';

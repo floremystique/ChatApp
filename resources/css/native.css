@@ -1,0 +1,24 @@
+/* Only applies inside Capacitor (class toggled in resources/js/native.js) */
+
+html.is-capacitor, html.is-capacitor body {
+  height: 100%;
+  overscroll-behavior: none;
+}
+
+html.is-capacitor body {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+}
+
+/* Avoid iOS text auto-zoom in forms */
+html.is-capacitor input, html.is-capacitor select, html.is-capacitor textarea {
+  font-size: 16px;
+}
+
+/* If you have a fixed header/footer, you can use these safe-area vars */
+:root {
+  --safe-top: env(safe-area-inset-top);
+  --safe-bottom: env(safe-area-inset-bottom);
+  --safe-left: env(safe-area-inset-left);
+  --safe-right: env(safe-area-inset-right);
+}

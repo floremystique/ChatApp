@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">JooJo</string>
+    <string name="title_activity_main">JooJo</string>
+    <string name="package_name">mu.floremystique.joojo</string>
+    <string name="custom_url_scheme">mu.floremystique.joojo</string>
+</resources>
