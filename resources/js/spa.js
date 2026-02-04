@@ -12,9 +12,55 @@ const state = {
     onboardingQuizHtml: null,
     messages: [],
     typing: false,
+    _typingActive: false,
+    _typingKeepalive: null,
     loading: false,
 };
 
+// --- Typing indicator reliability ---
+// Backend typing uses a short TTL. If the chat list isn't refreshed exactly when
+// the TTL expires, "Typing…" can look stuck. We keep a local expiry window and
+// auto-clear it client-side.
+const _typingUntilByRoom = new Map(); // roomUuid -> epoch(ms)
+const _typingClearTimers = new Map(); // roomUuid -> timeoutId
+const TYPING_UI_TTL_MS = 4500; // should be slightly > server TTL
+
+function setRoomTyping(roomUuid, isTyping) {
+  if (!roomUuid) return;
+
+  // Clear any existing auto-clear timer
+  const prev = _typingClearTimers.get(roomUuid);
+  if (prev) { clearTimeout(prev); _typingClearTimers.delete(roomUuid); }
+
+  if (!isTyping) {
+    _typingUntilByRoom.delete(roomUuid);
+    return;
+  }
+
+  const until = Date.now() + TYPING_UI_TTL_MS;
+  _typingUntilByRoom.set(roomUuid, until);
+
+  // Auto-clear and re-render the list if needed.
+  const t = setTimeout(() => {
+    const cur = _typingUntilByRoom.get(roomUuid);
+    if (cur && Date.now() >= cur) {
+      _typingUntilByRoom.delete(roomUuid);
+      if (state.activeTab === 'chats') renderRoomsList();
+      if (state.activeRoom?.uuid === roomUuid) { state.typing = false; renderTyping(); }
+    }
+  }, TYPING_UI_TTL_MS + 50);
+  _typingClearTimers.set(roomUuid, t);
+}
+
+function isRoomTyping(roomUuid) {
+  const until = _typingUntilByRoom.get(roomUuid);
+  if (!until) return false;
+  if (Date.now() >= until) {
+    _typingUntilByRoom.delete(roomUuid);
+    return false;
+  }
+  return true;
+}
 // Keep memory stable on mobile: never hold the entire history in DOM/JS.
 const MAX_MSGS_IN_MEMORY = 300;
 
@@ -22,6 +68,7 @@ let _renderMessagesScheduled = false;
 let _renderScrollToBottom = false;
 
 let _seenDebounceTimer = null;
+let _lastSeenSentAt = 0;
 
 function trimMessageWindow() {
   const extra = state.messages.length - MAX_MSGS_IN_MEMORY;
@@ -42,10 +89,20 @@ function scheduleRenderChatMessages(scrollToBottom) {
 function scheduleSeen() {
   if (!state.activeRoom?.uuid) return;
   if (document.visibilityState !== 'visible') return;
+
+  // Debounce + cap frequency. Seen updates can be triggered by many UI renders and incoming messages.
   clearTimeout(_seenDebounceTimer);
   _seenDebounceTimer = setTimeout(async () => {
-    try { await apiPost(`/chat/${state.activeRoom.uuid}/seen`, {}); } catch {}
-  }, 800);
+    const now = Date.now();
+    // Hard cap: at most once every 2500ms.
+    if (now - _lastSeenSentAt < 2500) return;
+    _lastSeenSentAt = now;
+    try {
+      await apiPost(`/chat/${state.activeRoom.uuid}/seen`, {});
+    } catch (e) {
+      // Ignore throttling/temporary failures; we'll try again on the next trigger.
+    }
+  }, 900);
 }
 
 function isNearBottom(elm, thresholdPx = 80) {
@@ -123,12 +180,43 @@ function htmlEscape(s) {
 }
 
 async function apiGet(url, params = {}) {
-    const res = await window.axios.get(url, { params, headers: { 'Accept': 'application/json' } });
-    return res.data;
+    const key = url.split('?')[0];
+    const now = Date.now();
+    state._throttleUntil = state._throttleUntil || {};
+    if (state._throttleUntil[key] && now < state._throttleUntil[key]) {
+        // Locally back off when we know we're being throttled.
+        throw new Error('throttled');
+    }
+    try {
+        const res = await window.axios.get(url, { params, headers: { 'Accept': 'application/json' } });
+        return res.data;
+    } catch (err) {
+        const status = err?.response?.status;
+        if (status === 429) {
+            const ra = Number(err?.response?.headers?.['retry-after'] || 1);
+            state._throttleUntil[key] = Date.now() + Math.max(ra, 1) * 1000;
+        }
+        throw err;
+    }
 }
 async function apiPost(url, data = {}) {
-    const res = await window.axios.post(url, data, { headers: { 'Accept': 'application/json' } });
-    return res.data;
+    const key = url.split('?')[0];
+    const now = Date.now();
+    state._throttleUntil = state._throttleUntil || {};
+    if (state._throttleUntil[key] && now < state._throttleUntil[key]) {
+        throw new Error('throttled');
+    }
+    try {
+        const res = await window.axios.post(url, data, { headers: { 'Accept': 'application/json' } });
+        return res.data;
+    } catch (err) {
+        const status = err?.response?.status;
+        if (status === 429) {
+            const ra = Number(err?.response?.headers?.['retry-after'] || 1);
+            state._throttleUntil[key] = Date.now() + Math.max(ra, 1) * 1000;
+        }
+        throw err;
+    }
 }
 
 async function boot() {
@@ -144,11 +232,28 @@ async function boot() {
     setAvatar(initials(state.user?.name));
     state.loading = false;
 
-    // Listen for chat list updates (new message/unread changes)
+    // Listen for user-scoped updates (single subscription, scales to many rooms)
     window.Echo.private(`user.${state.user.id}`)
         .listen('.chatlist.updated', (e) => {
-            // Minimal: re-fetch rooms (fast enough now; later optimize by patching)
+            // Chat list updates (new message/unread changes)
             refreshRooms();
+        })
+        .listen('.user.typing', (e) => {
+            // Typing updates for ANY room without subscribing to every room channel.
+            // Payload: { roomUuid, userId, typing }
+            if (!e || !e.roomUuid) return;
+            // Don't show our own typing in the list (optional)
+            if (e.userId != null && state.user?.id != null && String(e.userId) === String(state.user.id)) return;
+
+            setRoomTyping(e.roomUuid, !!e.typing);
+
+            // Update chat header typing when currently in that room too (extra reliability)
+            if (state.activeRoom?.uuid === e.roomUuid) {
+                state.typing = !!e.typing;
+                renderTyping();
+            }
+
+            if (state.activeTab === 'chats') renderRoomsList();
         });
 
     // Default view
@@ -164,6 +269,12 @@ let cachedMatchesHtml = null;
 let cachedProfileHtml = null;
 let cachedOnboardingProfileHtml = null;
 let cachedOnboardingQuizHtml = null;
+
+// Chat list incremental rerender helper (used by typing auto-clear)
+let _renderRoomsListFn = null;
+function renderRoomsList() {
+  try { _renderRoomsListFn && _renderRoomsListFn(); } catch {}
+}
 
 async function preloadMatchesHtml() {
     try {
@@ -197,6 +308,12 @@ async function refreshRooms() {
     try {
         const data = await apiGet('/api/rooms');
         state.rooms = data.rooms || [];
+
+        // Keep a local expiry window so "Typing…" doesn't stick if the list isn't
+        // refreshed exactly when backend TTL expires.
+        for (const r of state.rooms) {
+          setRoomTyping(r.uuid, !!r.typing);
+        }
         if (state.activeTab === 'chats' && !state.activeRoom) renderChatsList();
     } catch {}
 }
@@ -324,7 +441,9 @@ function renderChatsList() {
 
         list.innerHTML = items.map(r => {
             const name = r.other_user?.name || 'User';
-            const last = r.typing ? 'Typing…' : (r.last_message?.body || '');
+            // Prefer local-expiry typing state to avoid "stuck" indicators.
+            const typingNow = isRoomTyping(r.uuid) || (!!r.typing && (setRoomTyping(r.uuid, true), true));
+            const last = typingNow ? 'Typing…' : (r.last_message?.body || '');
             const time = r.last_message?.created_at ? new Date(r.last_message.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
             const unread = r.unread_count || 0;
 
@@ -339,7 +458,7 @@ function renderChatsList() {
                             <div class="text-[11px] text-gray-400 ml-2">${htmlEscape(time)}</div>
                         </div>
                         <div class="flex items-center justify-between mt-1">
-                            <div class="text-xs ${r.typing ? 'text-purple-600 font-semibold' : 'text-gray-500'} truncate">${htmlEscape(last)}</div>
+                            <div class="text-xs ${typingNow ? 'text-purple-600 font-semibold' : 'text-gray-500'} truncate">${htmlEscape(last)}</div>
                             ${unread ? `<span class="ml-2 text-[11px] bg-purple-600 text-white rounded-full px-2 py-0.5">${unread}</span>` : ``}
                         </div>
                     </div>
@@ -352,6 +471,7 @@ function renderChatsList() {
 
     const search = document.getElementById('spa-search');
     search.addEventListener('input', () => renderList(search.value));
+    _renderRoomsListFn = () => renderList(search.value || '');
 
     list.querySelectorAll('button[data-room-id]').forEach(btn => {
         btn.addEventListener('click', async () => {
@@ -389,6 +509,7 @@ async function openRoom(roomId, roomUuid) {
             // Ignore my own typing echo
             if (String(e.userId) === String(state.user?.id)) return;
             state.typing = !!e.typing;
+            setRoomTyping(roomUuid, state.typing);
             renderTyping();
         })
         .listen('.message.seen', (e) => {
@@ -535,11 +656,31 @@ function renderChatRoom() {
 
 
         input.addEventListener('input', () => {
-            apiPost(`/chat/${state.activeRoom.uuid}/typing`, { typing: true }).catch(()=>{});
+            if (!state.activeRoom?.uuid) return;
+
+            // Send "typing: true" only when we ENTER typing state,
+            // then refresh it on a low-frequency keepalive (no spam).
+            if (!state._typingActive) {
+                state._typingActive = true;
+                apiPost(`/chat/${state.activeRoom.uuid}/typing`, { typing: true }).catch(()=>{});
+            }
+
+            // Debounced stop-typing
             clearTimeout(typingTimer);
             typingTimer = setTimeout(() => {
+                state._typingActive = false;
+                clearInterval(state._typingKeepalive);
+                state._typingKeepalive = null;
                 apiPost(`/chat/${state.activeRoom.uuid}/typing`, { typing: false }).catch(()=>{});
-            }, 900);
+            }, 1800);
+
+            // Keepalive to extend TTL while the user is still typing (low frequency to avoid spam)
+            if (!state._typingKeepalive) {
+                state._typingKeepalive = setInterval(() => {
+                    if (!state._typingActive || !state.activeRoom?.uuid) return;
+                    apiPost(`/chat/${state.activeRoom.uuid}/typing`, { typing: true }).catch(()=>{});
+                }, 2500);
+            }
         });
 
         document.getElementById('spa-send-form').addEventListener('submit', async (e) => {
@@ -579,13 +720,36 @@ function renderChatRoom() {
               scheduleRenderChatMessages(true);
             }
           } catch (err) {
-            // Mark failed; user can re-send by tapping the bubble
-            const i = state.messages.findIndex(m => (m.client_message_id ?? m.clientMessageId) === clientId);
-            if (i >= 0) {
-              state.messages[i].pending = false;
-              state.messages[i].failed = true;
+            const status = err?.response?.status;
+            // If throttled (429) or local backoff, DON'T mark as failed. We'll retry once automatically.
+            if (status === 429 || err?.message === 'throttled') {
+              const retryMs = 1200;
+              setTimeout(async () => {
+                try {
+                  const res2 = await apiPost(`/chat/${state.activeRoom.uuid}/send`, { body, client_message_id: clientId });
+                  if (res2?.message) {
+                    pushUniqueMessage(res2.message);
+                    scheduleRenderChatMessages(true);
+                  }
+                } catch (e2) {
+                  // If it still fails, mark as failed.
+                  const i2 = state.messages.findIndex(m => (m.client_message_id ?? m.clientMessageId) === clientId);
+                  if (i2 >= 0) {
+                    state.messages[i2].pending = false;
+                    state.messages[i2].failed = true;
+                  }
+                  scheduleRenderChatMessages(true);
+                }
+              }, retryMs);
+            } else {
+              // Mark failed; user can re-send by tapping the bubble
+              const i = state.messages.findIndex(m => (m.client_message_id ?? m.clientMessageId) === clientId);
+              if (i >= 0) {
+                state.messages[i].pending = false;
+                state.messages[i].failed = true;
+              }
+              scheduleRenderChatMessages(true);
             }
-            scheduleRenderChatMessages(true);
           } finally {
             requestAnimationFrame(() => {
               input.focus({ preventScroll: true });

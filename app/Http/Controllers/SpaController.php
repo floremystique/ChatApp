@@ -84,7 +84,6 @@ class SpaController extends Controller
         // Cache briefly to collapse bursts of "chatlist.updated" events.
         return Cache::remember("rooms:$me", 2, function () use ($me) {
             $otherJoin = "CASE WHEN chat_rooms.user_one = $me THEN chat_rooms.user_two ELSE chat_rooms.user_one END";
-            $typingExpr = "CASE WHEN chat_rooms.user_one = $me THEN chat_rooms.user_two_typing_until ELSE chat_rooms.user_one_typing_until END";
 
             $rows = DB::table('chat_rooms')
                 ->where(function ($q) use ($me) {
@@ -109,7 +108,6 @@ class SpaController extends Controller
                     'lm.body as last_body',
                     'lm.created_at as last_created_at',
                     DB::raw('COALESCE(r.unread_count, 0) as unread_count'),
-                    DB::raw("$typingExpr as other_typing_until"),
                 ])
                 ->orderByDesc('chat_rooms.updated_at')
                 ->limit(200)
@@ -117,25 +115,25 @@ class SpaController extends Controller
 
             return $rows->map(function ($row) {
                 $typing = false;
-                if ($row->other_typing_until) {
-                    try {
-                        $typing = now()->lt(\Illuminate\Support\Carbon::parse($row->other_typing_until));
-                    } catch (\Throwable $e) {
-                        $typing = false;
-                    }
+                if ($row->other_id) {
+                    $typing = Cache::has("typing:{$row->uuid}:{$row->other_id}");
                 }
 
                 return [
-                    'id' => (int)$row->id,
+                    'id' => (int) $row->id,
                     'uuid' => $row->uuid,
-                    'other_user' => $row->other_id ? ['id' => (int)$row->other_id, 'name' => $row->other_name] : null,
-                    'last_message' => $row->last_id ? [
-                        'id' => (int)$row->last_id,
-                        'body' => $row->last_body,
-                        'created_at' => optional($row->last_created_at ? \Illuminate\Support\Carbon::parse($row->last_created_at) : null)->toISOString(),
-                    ] : null,
-                    'unread_count' => (int)$row->unread_count,
-                    'typing' => (bool)$typing,
+                    'other_user' => $row->other_id
+                        ? ['id' => (int) $row->other_id, 'name' => $row->other_name]
+                        : null,
+                    'last_message' => $row->last_id
+                        ? [
+                            'id' => (int) $row->last_id,
+                            'body' => $row->last_body,
+                            'created_at' => optional($row->last_created_at ? \Illuminate\Support\Carbon::parse($row->last_created_at) : null)->toISOString(),
+                        ]
+                        : null,
+                    'unread_count' => (int) $row->unread_count,
+                    'typing' => (bool) $typing,
                     'closed_at' => optional($row->closed_at ? \Illuminate\Support\Carbon::parse($row->closed_at) : null)->toISOString(),
                     'closed_by' => $row->closed_by,
                 ];
